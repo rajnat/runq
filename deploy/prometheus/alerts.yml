@@ -1,0 +1,38 @@
+groups:
+  - name: runq-control-plane
+    rules:
+      - alert: RunqAPIHigh5xxRate
+        expr: sum(rate(runq_api_requests_total{status="5xx"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: runq API is returning 5xx responses
+          description: The API has sustained 5xx responses for at least 5 minutes.
+
+      - alert: RunqSchedulerHighSkipRate
+        expr: sum(rate(runq_scheduler_skipped_runs_total[5m])) by (reason) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: runq scheduler is skipping work frequently
+          description: Scheduler skip rate is elevated for reason {{ $labels.reason }}.
+
+      - alert: RunqWorkerHeartbeatConflicts
+        expr: increase(runq_worker_heartbeat_conflicts_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: runq worker heartbeat conflicts detected
+          description: Workers are losing leases or colliding with stale ownership.
+
+      - alert: RunqReaperRecoverySpike
+        expr: sum(rate(runq_reaper_runs_recovered_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: runq reaper is recovering runs frequently
+          description: The reaper is recovering expired leases at an elevated rate.
