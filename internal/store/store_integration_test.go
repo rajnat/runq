@@ -270,6 +270,71 @@ func TestUpsertAndListTenantQuotas(t *testing.T) {
 	}
 }
 
+func TestCreateJobRejectsDuplicateDedupeKey(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	input := CreateJobInput{
+		Name:         "dedupe-job",
+		TenantID:     "tenant-dedupe",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "once",
+		DedupeKey:    "same-key",
+	}
+
+	if _, err := store.CreateJob(ctx, input); err != nil {
+		t.Fatalf("create first deduped job: %v", err)
+	}
+	if _, err := store.CreateJob(ctx, input); err != ErrAlreadyExists {
+		t.Fatalf("expected ErrAlreadyExists for duplicate dedupe key, got %v", err)
+	}
+}
+
+func TestRegisterWorkerReusesExistingName(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	first, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "worker-stable",
+		Queues:         []string{"default"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"version": 1},
+	})
+	if err != nil {
+		t.Fatalf("register first worker: %v", err)
+	}
+
+	second, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "worker-stable",
+		Queues:         []string{"default"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 2,
+		Metadata:       map[string]any{"version": 2},
+	})
+	if err != nil {
+		t.Fatalf("register second worker: %v", err)
+	}
+	if first.WorkerID != second.WorkerID {
+		t.Fatalf("expected stable worker id, got %s then %s", first.WorkerID, second.WorkerID)
+	}
+
+	workers, err := store.ListWorkers(ctx)
+	if err != nil {
+		t.Fatalf("list workers: %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("expected a single worker row, got %+v", workers)
+	}
+	if workers[0].MaxConcurrency != 2 {
+		t.Fatalf("expected worker update to persist, got %+v", workers[0])
+	}
+}
+
 func TestClaimPendingRunsRequiresMatchingCapability(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

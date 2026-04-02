@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -91,7 +92,7 @@ func LoadWorker() WorkerConfig {
 	return WorkerConfig{
 		APIBaseURL:        envOrDefault("RUNQ_API_BASE_URL", defaultAPIBaseURL),
 		AuthToken:         envOrDefault("RUNQ_WORKER_AUTH_TOKEN", ""),
-		Name:              envOrDefault("RUNQ_WORKER_NAME", "worker-local"),
+		Name:              envOrDefault("RUNQ_WORKER_NAME", defaultWorkerName()),
 		Queues:            csvEnvOrDefault("RUNQ_WORKER_QUEUES", []string{"default"}),
 		Capabilities:      csvEnvOrDefault("RUNQ_WORKER_CAPABILITIES", []string{"http"}),
 		MaxConcurrency:    intEnvOrDefault("RUNQ_WORKER_MAX_CONCURRENCY", 4),
@@ -187,4 +188,12 @@ func defaultComponentMetricsAddr(name string) string {
 	default:
 		return ""
 	}
+}
+
+func defaultWorkerName() string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "localhost"
+	}
+	return fmt.Sprintf("worker-%s-%d", hostname, os.Getpid())
 }

@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -230,8 +229,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var req CreateJobRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be valid JSON")
+	if ok := decodeJSONBody(w, r, &req); !ok {
 		return
 	}
 
@@ -254,6 +252,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.createJob(ctx, req)
 	if err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, "JOB_ALREADY_EXISTS", "an active job with this dedupe key already exists")
+			return
+		}
 		s.logger.Printf("create job failed: %v", err)
 		s.metrics.IncCounter("runq_api_job_create_errors_total")
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create job")
@@ -395,8 +397,7 @@ func (s *Server) handleUpsertTenantQuota(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 
 	var req UpsertTenantQuotaRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be valid JSON")
+	if ok := decodeJSONBody(w, r, &req); !ok {
 		return
 	}
 	if err := req.Validate(); err != nil {
@@ -531,8 +532,7 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var req RegisterWorkerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be valid JSON")
+	if ok := decodeJSONBody(w, r, &req); !ok {
 		return
 	}
 
@@ -578,8 +578,7 @@ func (s *Server) handlePollWorker(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req PollWorkerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be valid JSON")
+	if ok := decodeJSONBody(w, r, &req); !ok {
 		return
 	}
 	if err := req.Validate(); err != nil {
@@ -629,8 +628,7 @@ func (s *Server) handleHeartbeatWorker(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req HeartbeatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be valid JSON")
+	if ok := decodeJSONBody(w, r, &req); !ok {
 		return
 	}
 
@@ -680,8 +678,7 @@ func (s *Server) handleCompleteRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CompleteRunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be valid JSON")
+	if ok := decodeJSONBody(w, r, &req); !ok {
 		return
 	}
 	if err := req.Validate(); err != nil {
@@ -728,8 +725,7 @@ func (s *Server) handleFailRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req FailRunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_JSON", "request body must be valid JSON")
+	if ok := decodeJSONBody(w, r, &req); !ok {
 		return
 	}
 	if err := req.Validate(); err != nil {

@@ -14,7 +14,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     timeout_seconds INTEGER NOT NULL DEFAULT 300,
     retry_backoff_base_seconds INTEGER NOT NULL DEFAULT 5,
     dedupe_key TEXT,
-    concurrency_key TEXT,
     created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -95,11 +94,13 @@ CREATE TABLE IF NOT EXISTS run_events (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_queue_priority ON jobs(queue, priority);
 CREATE INDEX IF NOT EXISTS idx_jobs_tenant_queue_priority ON jobs(tenant_id, queue, priority);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedupe_key ON jobs(tenant_id, dedupe_key) WHERE dedupe_key IS NOT NULL AND disabled_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_job_schedules_next_run_at ON job_schedules(next_run_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status_available_at ON runs(status, available_at);
 CREATE INDEX IF NOT EXISTS idx_runs_job_id_scheduled_at ON runs(job_id, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_runs_worker_status ON runs(worker_id, status);
 CREATE INDEX IF NOT EXISTS idx_runs_lease_expires_at ON runs(lease_expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_name ON workers(name);
 CREATE INDEX IF NOT EXISTS idx_workers_status_last_heartbeat_at ON workers(status, last_heartbeat_at);
 CREATE INDEX IF NOT EXISTS idx_audit_events_event_time ON audit_events(event_time DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_time ON audit_events(tenant_id, event_time DESC);

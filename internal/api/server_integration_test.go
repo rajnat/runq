@@ -305,6 +305,53 @@ func TestCreateJobRejectsUnknownScheduleType(t *testing.T) {
 	}
 }
 
+func TestCreateJobRejectsUnknownFields(t *testing.T) {
+	jobStore := openTestStore(t)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":       "api-unknown-field",
+		"tenant_id":  "tenant-api",
+		"queue":      "default",
+		"kind":       "http",
+		"payload":    map[string]any{"url": "https://example.internal/task"},
+		"queue_typo": "unexpected",
+	}, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown field, got %d", status)
+	}
+}
+
+func TestCreateJobRejectsDuplicateDedupeKey(t *testing.T) {
+	jobStore := openTestStore(t)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	payload := map[string]any{
+		"name":       "api-dedupe",
+		"tenant_id":  "tenant-api",
+		"queue":      "default",
+		"kind":       "http",
+		"dedupe_key": "dedupe-123",
+		"payload":    map[string]any{"url": "https://example.internal/task"},
+	}
+
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", payload, &map[string]any{})
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202 creating deduped job, got %d", status)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", payload, &map[string]any{})
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 for duplicate dedupe key, got %d", status)
+	}
+}
+
 func TestNewServerReturnsConfigError(t *testing.T) {
 	server, err := NewServer(config.APIConfig{
 		AuthTokens: "bad-entry",
@@ -329,6 +376,25 @@ func TestWorkerTokenCannotRegisterDifferentWorkerName(t *testing.T) {
 	}, &map[string]any{})
 	if status != http.StatusForbidden {
 		t.Fatalf("expected 403 for mismatched worker name, got %d", status)
+	}
+}
+
+func TestRegisterWorkerRejectsUnknownFields(t *testing.T) {
+	jobStore := openTestStore(t)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+		"extra":           true,
+	}, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown worker register field, got %d", status)
 	}
 }
 
@@ -366,6 +432,39 @@ func TestWorkerTokenCannotOperateOnAnotherWorkerID(t *testing.T) {
 	}, &map[string]any{})
 	if status != http.StatusForbidden {
 		t.Fatalf("expected 403 when worker token uses another worker id, got %d", status)
+	}
+}
+
+func TestRegisterWorkerReusesIdentityByName(t *testing.T) {
+	jobStore := openTestStore(t)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var first RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &first)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	var second RegisterWorkerResponse
+	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 2,
+	}, &second)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 re-registering worker, got %d", status)
+	}
+	if first.WorkerID != second.WorkerID {
+		t.Fatalf("expected stable worker identity, got %s then %s", first.WorkerID, second.WorkerID)
 	}
 }
 

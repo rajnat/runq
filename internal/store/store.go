@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/eswar/runq/internal/observability"
-	_ "github.com/lib/pq"
 	"github.com/robfig/cron/v3"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -23,6 +22,7 @@ type Store struct {
 }
 
 var ErrConflict = errors.New("state conflict")
+var ErrAlreadyExists = errors.New("already exists")
 
 type CreateJobInput struct {
 	Name                    string
@@ -296,6 +296,25 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 	if err != nil {
 		return CreateJobResult{}, err
 	}
+	tenantID := defaultTenantID(input.TenantID)
+
+	if strings.TrimSpace(input.DedupeKey) != "" {
+		var existingJobID string
+		err := tx.QueryRowContext(ctx, `
+			SELECT id
+			FROM jobs
+			WHERE tenant_id = $1
+			  AND dedupe_key = $2
+			  AND disabled_at IS NULL
+			LIMIT 1
+		`, tenantID, strings.TrimSpace(input.DedupeKey)).Scan(&existingJobID)
+		if err == nil {
+			return CreateJobResult{}, ErrAlreadyExists
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return CreateJobResult{}, fmt.Errorf("check dedupe key: %w", err)
+		}
+	}
 
 	payloadJSON, err := json.Marshal(input.Payload)
 	if err != nil {
@@ -312,7 +331,7 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 	`,
 		jobID,
 		input.Name,
-		defaultTenantID(input.TenantID),
+		tenantID,
 		input.Queue,
 		input.Kind,
 		string(payloadJSON),
@@ -657,11 +676,6 @@ func (s *Store) CancelJob(ctx context.Context, jobID string, reason string, audi
 }
 
 func (s *Store) RegisterWorker(ctx context.Context, input RegisterWorkerInput) (RegisterWorkerResult, error) {
-	workerID, err := newID("worker")
-	if err != nil {
-		return RegisterWorkerResult{}, err
-	}
-
 	capabilitiesJSON, err := json.Marshal(input.Capabilities)
 	if err != nil {
 		return RegisterWorkerResult{}, fmt.Errorf("marshal capabilities: %w", err)
@@ -673,15 +687,54 @@ func (s *Store) RegisterWorker(ctx context.Context, input RegisterWorkerInput) (
 	}
 
 	now := time.Now().UTC()
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO workers (
-			id, name, queues, capabilities, max_concurrency, status,
-			last_heartbeat_at, started_at, metadata
-		)
-		VALUES ($1, $2, $3, $4::jsonb, $5, 'healthy', $6, $6, $7::jsonb)
-	`, workerID, input.Name, pqArray(input.Queues), string(capabilitiesJSON), input.MaxConcurrency, now, string(metadataJSON))
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return RegisterWorkerResult{}, fmt.Errorf("insert worker: %w", err)
+		return RegisterWorkerResult{}, fmt.Errorf("begin register worker tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var workerID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id
+		FROM workers
+		WHERE name = $1
+		FOR UPDATE
+	`, input.Name).Scan(&workerID)
+	switch {
+	case err == nil:
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workers
+			SET queues = $2,
+			    capabilities = $3::jsonb,
+			    max_concurrency = $4,
+			    status = 'healthy',
+			    last_heartbeat_at = $5,
+			    started_at = $5,
+			    metadata = $6::jsonb
+			WHERE id = $1
+		`, workerID, pqArray(input.Queues), string(capabilitiesJSON), input.MaxConcurrency, now, string(metadataJSON)); err != nil {
+			return RegisterWorkerResult{}, fmt.Errorf("update worker: %w", err)
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		workerID, err = newID("worker")
+		if err != nil {
+			return RegisterWorkerResult{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO workers (
+				id, name, queues, capabilities, max_concurrency, status,
+				last_heartbeat_at, started_at, metadata
+			)
+			VALUES ($1, $2, $3, $4::jsonb, $5, 'healthy', $6, $6, $7::jsonb)
+		`, workerID, input.Name, pqArray(input.Queues), string(capabilitiesJSON), input.MaxConcurrency, now, string(metadataJSON)); err != nil {
+			return RegisterWorkerResult{}, fmt.Errorf("insert worker: %w", err)
+		}
+	default:
+		return RegisterWorkerResult{}, fmt.Errorf("lookup worker by name: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return RegisterWorkerResult{}, fmt.Errorf("commit register worker tx: %w", err)
 	}
 
 	return RegisterWorkerResult{WorkerID: workerID}, nil
