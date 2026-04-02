@@ -1056,7 +1056,7 @@ func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDurati
 			    worker_id = $2,
 			    lease_token = lease_token + 1,
 			    lease_expires_at = NOW() + ($3 * INTERVAL '1 second'),
-			    started_at = COALESCE(started_at, NOW()),
+			    started_at = NOW(),
 			    updated_at = NOW()
 			WHERE id = $1
 			RETURNING id, job_id, worker_id, lease_token, updated_at, lease_expires_at
@@ -1454,6 +1454,7 @@ func (s *Store) FailRun(ctx context.Context, input FailRunInput) error {
 			SET status = 'PENDING',
 			    attempt = attempt + 1,
 			    available_at = $4,
+			    started_at = NULL,
 			    worker_id = NULL,
 			    lease_expires_at = NULL,
 			    last_heartbeat_at = NULL,
@@ -1571,6 +1572,7 @@ func (s *Store) RecoverExpiredRuns(ctx context.Context, batchSize int) ([]Recove
 				SET status = 'PENDING',
 				    attempt = attempt + 1,
 				    available_at = $2,
+				    started_at = NULL,
 				    worker_id = NULL,
 				    lease_expires_at = NULL,
 				    last_heartbeat_at = NULL,
@@ -1683,6 +1685,7 @@ func (s *Store) RecoverTimedOutRuns(ctx context.Context, batchSize int) ([]Recov
 				SET status = 'PENDING',
 				    attempt = attempt + 1,
 				    available_at = $2,
+				    started_at = NULL,
 				    worker_id = NULL,
 				    lease_expires_at = NULL,
 				    last_heartbeat_at = NULL,

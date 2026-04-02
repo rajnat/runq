@@ -87,6 +87,9 @@ func TestFailRunRetryableRequeues(t *testing.T) {
 	if run.ErrorCode == nil || *run.ErrorCode != "HTTP_503" {
 		t.Fatalf("expected HTTP_503 error code, got %+v", run.ErrorCode)
 	}
+	if run.StartedAt != nil {
+		t.Fatalf("expected started_at to reset on requeue, got %+v", run.StartedAt)
+	}
 }
 
 func TestCancelJobDisablesAndCancelsPendingRuns(t *testing.T) {
@@ -166,6 +169,74 @@ func TestRecoverTimedOutRunsRequeues(t *testing.T) {
 	}
 	if run.ErrorCode == nil || *run.ErrorCode != "TIMED_OUT" {
 		t.Fatalf("expected TIMED_OUT error code, got %+v", run.ErrorCode)
+	}
+	if run.StartedAt != nil {
+		t.Fatalf("expected started_at to reset after timeout requeue, got %+v", run.StartedAt)
+	}
+}
+
+func TestClaimPendingRunsResetsStartedAtPerAttempt(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	runID, workerID := createRunningRun(t, store, ctx, 30, 3)
+
+	beforeRetry, _, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get run before retry: %v", err)
+	}
+	if beforeRetry.StartedAt == nil {
+		t.Fatalf("expected started_at before retry")
+	}
+
+	if err := store.FailRun(ctx, FailRunInput{
+		WorkerID:     workerID,
+		RunID:        runID,
+		LeaseToken:   1,
+		ErrorCode:    "HTTP_503",
+		ErrorMessage: "upstream unavailable",
+		Retryable:    true,
+	}); err != nil {
+		t.Fatalf("fail run: %v", err)
+	}
+
+	registered, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "retry-worker",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "retry"},
+	})
+	if err != nil {
+		t.Fatalf("register retry worker: %v", err)
+	}
+
+	_, err = store.DB().ExecContext(ctx, `UPDATE runs SET available_at = NOW() WHERE id = $1`, runID)
+	if err != nil {
+		t.Fatalf("make retried run available: %v", err)
+	}
+
+	assignments, _, err := store.ClaimPendingRuns(ctx, 1, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim pending runs: %v", err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected 1 assignment after retry, got %d", len(assignments))
+	}
+	if assignments[0].WorkerID != registered.WorkerID {
+		t.Fatalf("expected assignment to retry worker, got %+v", assignments[0])
+	}
+
+	afterRetry, _, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get run after retry: %v", err)
+	}
+	if afterRetry.StartedAt == nil {
+		t.Fatalf("expected started_at after reclaim")
+	}
+	if !afterRetry.StartedAt.After(*beforeRetry.StartedAt) {
+		t.Fatalf("expected started_at to move forward across attempts, before=%s after=%s", beforeRetry.StartedAt, afterRetry.StartedAt)
 	}
 }
 

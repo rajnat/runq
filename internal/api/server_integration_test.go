@@ -28,7 +28,7 @@ const (
 func TestCreateJobAndListRunsEndpoints(t *testing.T) {
 	jobStore := openTestStore(t)
 
-	server := NewServer(testAPIConfig(), log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
@@ -91,7 +91,7 @@ func TestCreateJobAndListRunsEndpoints(t *testing.T) {
 func TestCancelJobEndpointCancelsPendingRun(t *testing.T) {
 	jobStore := openTestStore(t)
 
-	server := NewServer(testAPIConfig(), log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
@@ -132,7 +132,7 @@ func TestCancelJobEndpointCancelsPendingRun(t *testing.T) {
 func TestTenantQuotaEndpoints(t *testing.T) {
 	jobStore := openTestStore(t)
 
-	server := NewServer(testAPIConfig(), log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
@@ -194,7 +194,7 @@ func TestTenantQuotaEndpoints(t *testing.T) {
 func TestUnauthorizedRequestsAreRejected(t *testing.T) {
 	jobStore := openTestStore(t)
 
-	server := NewServer(testAPIConfig(), log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
@@ -207,7 +207,7 @@ func TestUnauthorizedRequestsAreRejected(t *testing.T) {
 func TestTenantCannotCrossTenantBoundaries(t *testing.T) {
 	jobStore := openTestStore(t)
 
-	server := NewServer(testAPIConfig(), log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
@@ -235,7 +235,7 @@ func TestTenantCannotCrossTenantBoundaries(t *testing.T) {
 func TestAdminCancelJobWritesAuditEvent(t *testing.T) {
 	jobStore := openTestStore(t)
 
-	server := NewServer(testAPIConfig(), log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
@@ -280,6 +280,37 @@ func TestAdminCancelJobWritesAuditEvent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected job cancel audit event in response, got %+v", auditResp.Events)
+	}
+}
+
+func TestCreateJobRejectsUnknownScheduleType(t *testing.T) {
+	jobStore := openTestStore(t)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-invalid-schedule",
+		"tenant_id": "tenant-api",
+		"queue":     "default",
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/task"},
+		"schedule": map[string]any{
+			"type": "delayed",
+		},
+	}, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown schedule type, got %d", status)
+	}
+}
+
+func TestNewServerReturnsConfigError(t *testing.T) {
+	server, err := NewServer(config.APIConfig{
+		AuthTokens: "bad-entry",
+	}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
+	if err == nil {
+		t.Fatalf("expected constructor error, got server=%v", server)
 	}
 }
 
@@ -350,4 +381,14 @@ func openTestStore(t *testing.T) *store.Store {
 		_ = jobStore.Close()
 	})
 	return jobStore
+}
+
+func newTestServer(t *testing.T, jobStore *store.Store) *Server {
+	t.Helper()
+
+	server, err := NewServer(testAPIConfig(), log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return server
 }

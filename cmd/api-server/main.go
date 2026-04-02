@@ -31,7 +31,11 @@ func main() {
 
 	observability.RunMetricsServer(context.Background(), logger, cfg.MetricsAddress, metrics)
 
-	if err := api.NewServer(cfg, logger, jobStore, metrics).Run(); err != nil {
+	server, err := api.NewServer(cfg, logger, jobStore, metrics)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	if err := server.Run(); err != nil {
 		logger.Fatal(err)
 	}
 }

@@ -25,6 +25,7 @@ type WorkerProcess struct {
 	cfg        config.WorkerConfig
 	httpClient *http.Client
 	metrics    *observability.Registry
+	assignWG   sync.WaitGroup
 
 	mu       sync.Mutex
 	workerID string
@@ -106,6 +107,9 @@ func NewWorkerProcess(logger *log.Logger, cfg config.WorkerConfig, metrics *obse
 }
 
 func (w *WorkerProcess) Run(ctx context.Context) error {
+	runCtx, cancelAssignments := context.WithCancel(ctx)
+	defer cancelAssignments()
+
 	workerID, err := w.register(ctx)
 	if err != nil {
 		return err
@@ -128,6 +132,8 @@ func (w *WorkerProcess) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			cancelAssignments()
+			w.assignWG.Wait()
 			return ctx.Err()
 		case <-heartbeatTicker.C:
 			if err := w.sendHeartbeat(ctx); err != nil {
@@ -135,7 +141,7 @@ func (w *WorkerProcess) Run(ctx context.Context) error {
 				w.logger.Printf("heartbeat failed: %v", err)
 			}
 		case <-pollTicker.C:
-			if err := w.pollAndDispatch(ctx); err != nil {
+			if err := w.pollAndDispatch(ctx, runCtx); err != nil {
 				w.metrics.IncCounter("runq_worker_poll_errors_total")
 				w.logger.Printf("poll failed: %v", err)
 			}
@@ -160,7 +166,7 @@ func (w *WorkerProcess) register(ctx context.Context) (string, error) {
 	return resp.WorkerID, nil
 }
 
-func (w *WorkerProcess) pollAndDispatch(ctx context.Context) error {
+func (w *WorkerProcess) pollAndDispatch(ctx context.Context, runCtx context.Context) error {
 	started := time.Now()
 	defer w.metrics.ObserveHistogram("runq_worker_poll_duration_seconds", time.Since(started).Seconds())
 
@@ -187,15 +193,17 @@ func (w *WorkerProcess) pollAndDispatch(ctx context.Context) error {
 		}
 		w.logger.Printf("starting run=%s job=%s kind=%s", assignment.RunID, assignment.JobID, assignment.Kind)
 		w.metrics.IncCounter("runq_worker_runs_started_total")
-		go w.executeAssignment(assignment)
+		w.assignWG.Add(1)
+		go w.executeAssignment(runCtx, assignment)
 	}
 
 	return nil
 }
 
-func (w *WorkerProcess) executeAssignment(assignment workerAssignment) {
+func (w *WorkerProcess) executeAssignment(ctx context.Context, assignment workerAssignment) {
+	defer w.assignWG.Done()
 	defer w.clearRunning(assignment.RunID)
-	ctx, span := observability.Tracer("runq/worker").Start(context.Background(), "worker.execute_assignment")
+	ctx, span := observability.Tracer("runq/worker").Start(ctx, "worker.execute_assignment")
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("runq.run_id", assignment.RunID),
@@ -209,13 +217,28 @@ func (w *WorkerProcess) executeAssignment(assignment workerAssignment) {
 	}
 
 	for i := 1; i <= steps; i++ {
+		if err := ctx.Err(); err != nil {
+			w.metrics.IncCounter("runq_worker_runs_abandoned_total")
+			w.logger.Printf("abandoning run=%s due to worker shutdown", assignment.RunID)
+			span.SetStatus(codes.Error, "worker shutdown")
+			return
+		}
 		if w.isAborted(assignment.RunID) {
 			w.metrics.IncCounter("runq_worker_runs_abandoned_total")
 			w.logger.Printf("abandoning run=%s due to lease loss or cancellation", assignment.RunID)
 			span.SetStatus(codes.Error, "lease loss or cancellation")
 			return
 		}
-		time.Sleep(time.Second)
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			w.metrics.IncCounter("runq_worker_runs_abandoned_total")
+			w.logger.Printf("abandoning run=%s due to worker shutdown", assignment.RunID)
+			span.SetStatus(codes.Error, "worker shutdown")
+			return
+		case <-timer.C:
+		}
 		w.setProgress(assignment.RunID, int(float64(i)*100/float64(steps)))
 	}
 

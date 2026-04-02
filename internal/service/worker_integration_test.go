@@ -262,6 +262,82 @@ func TestWorkerProcessRegistersConfiguredCapabilities(t *testing.T) {
 	}
 }
 
+func TestWorkerProcessWaitsForAssignmentsOnShutdown(t *testing.T) {
+	jobStore := openTestStore(t)
+	release := lockAndResetTables(t, jobStore)
+	defer release()
+	queue := "worker-shutdown-" + time.Now().UTC().Format("150405.000000000")
+
+	result, err := jobStore.CreateJob(context.Background(), store.CreateJobInput{
+		Name:                    "worker-shutdown",
+		Priority:                1,
+		Queue:                   queue,
+		Kind:                    "http",
+		Payload:                 map[string]any{"url": "https://example.internal/task"},
+		ScheduleType:            "once",
+		TimeoutSeconds:          30,
+		MaxRetries:              2,
+		RetryBackoffBaseSeconds: 1,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if result.RunID == nil {
+		t.Fatalf("expected run id")
+	}
+
+	httpServer := httptest.NewServer(newWorkerTestMux(jobStore))
+	defer httpServer.Close()
+
+	worker := NewWorkerProcess(log.New(io.Discard, "", 0), config.WorkerConfig{
+		APIBaseURL:        httpServer.URL,
+		Name:              "worker-shutdown-test",
+		Queues:            []string{queue},
+		Capabilities:      []string{"http"},
+		MaxConcurrency:    1,
+		PollInterval:      100 * time.Millisecond,
+		HeartbeatInterval: 100 * time.Millisecond,
+		ExecutionTime:     10 * time.Second,
+	}, observability.NewRegistry())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- worker.Run(ctx)
+	}()
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return worker.getWorkerID() != ""
+	})
+
+	scheduler := NewScheduler(log.New(io.Discard, "", 0), jobStore, config.ComponentConfig{
+		ClaimBatchSize: 1,
+		LeaseDuration:  30 * time.Second,
+	}, observability.NewRegistry())
+	if err := scheduler.tick(ctx); err != nil {
+		t.Fatalf("scheduler tick: %v", err)
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return worker.runningCount() == 1
+	})
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("worker exit: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker did not exit after draining assignments")
+	}
+
+	if count := worker.runningCount(); count != 0 {
+		t.Fatalf("expected no running assignments after shutdown, got %d", count)
+	}
+}
+
 func TestSchedulerEmitsPlacementMetrics(t *testing.T) {
 	jobStore := openTestStore(t)
 	release := lockAndResetTables(t, jobStore)

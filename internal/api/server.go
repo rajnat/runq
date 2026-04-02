@@ -28,10 +28,10 @@ type Server struct {
 	authTokens map[string]principal
 }
 
-func NewServer(cfg config.APIConfig, logger *log.Logger, jobStore *store.Store, metrics *observability.Registry) *Server {
+func NewServer(cfg config.APIConfig, logger *log.Logger, jobStore *store.Store, metrics *observability.Registry) (*Server, error) {
 	authTokens, err := parseAuthTokens(cfg)
 	if err != nil {
-		logger.Fatalf("parse api auth tokens: %v", err)
+		return nil, fmt.Errorf("parse api auth tokens: %w", err)
 	}
 
 	server := &Server{
@@ -45,7 +45,7 @@ func NewServer(cfg config.APIConfig, logger *log.Logger, jobStore *store.Store, 
 
 	server.routes()
 
-	return server
+	return server, nil
 }
 
 func (s *Server) Run() error {

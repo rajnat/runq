@@ -126,11 +126,24 @@ func (r CreateJobRequest) Validate() error {
 		return errors.New("kind is required")
 	}
 	if r.Schedule != nil {
-		if strings.TrimSpace(r.Schedule.Type) == "" {
+		scheduleType := strings.TrimSpace(r.Schedule.Type)
+		if scheduleType == "" {
 			return errors.New("schedule.type is required")
 		}
-		if r.Schedule.Type == "cron" && strings.TrimSpace(r.Schedule.Cron) == "" {
-			return errors.New("schedule.cron is required for cron schedules")
+		switch scheduleType {
+		case "once":
+			if strings.TrimSpace(r.Schedule.Cron) != "" {
+				return errors.New("schedule.cron is only valid for cron schedules")
+			}
+			if strings.TrimSpace(r.Schedule.Timezone) != "" {
+				return errors.New("schedule.timezone is only valid for cron schedules")
+			}
+		case "cron":
+			if strings.TrimSpace(r.Schedule.Cron) == "" {
+				return errors.New("schedule.cron is required for cron schedules")
+			}
+		default:
+			return errors.New("schedule.type must be one of once or cron")
 		}
 	}
 	return nil
