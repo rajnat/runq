@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eswar/runq/internal/observability"
+	"github.com/lib/pq"
 	"github.com/robfig/cron/v3"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -344,6 +345,9 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 		now,
 	)
 	if err != nil {
+		if isUniqueViolation(err, "idx_jobs_active_dedupe_key") {
+			return CreateJobResult{}, ErrAlreadyExists
+		}
 		return CreateJobResult{}, fmt.Errorf("insert job: %w", err)
 	}
 
@@ -378,8 +382,8 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 		INSERT INTO runs (
 			id, job_id, status, attempt, scheduled_at, available_at, created_at, updated_at
 		)
-		VALUES ($1, $2, 'PENDING', 0, $3, $3, $3, $3)
-	`, runID, jobID, now)
+		VALUES ($1, $2, 'PENDING', 0, NOW(), NOW(), NOW(), NOW())
+	`, runID, jobID)
 	if err != nil {
 		return CreateJobResult{}, fmt.Errorf("insert run: %w", err)
 	}
@@ -1468,6 +1472,9 @@ func (s *Store) CompleteRun(ctx context.Context, input CompleteRunInput) error {
 	`, input.RunID, input.WorkerID, string(resultJSON)); err != nil {
 		return fmt.Errorf("insert run succeeded event: %w", err)
 	}
+	if err := disableTerminalOneOffJob(ctx, tx, input.RunID, now); err != nil {
+		return err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit complete tx: %w", err)
@@ -1565,6 +1572,9 @@ func (s *Store) FailRun(ctx context.Context, input FailRunInput) error {
 			VALUES ($1, 'RUN_FAILED', 'worker', $2, $3::jsonb)
 		`, input.RunID, input.WorkerID, payload); err != nil {
 			return fmt.Errorf("insert run failed event: %w", err)
+		}
+		if err := disableTerminalOneOffJob(ctx, tx, input.RunID, now); err != nil {
+			return err
 		}
 	}
 
@@ -1682,6 +1692,9 @@ func (s *Store) RecoverExpiredRuns(ctx context.Context, batchSize int) ([]Recove
 		`, item.runID); err != nil {
 			return nil, fmt.Errorf("insert reaper failed event: %w", err)
 		}
+		if err := disableTerminalOneOffJob(ctx, tx, item.runID, now); err != nil {
+			return nil, err
+		}
 		recovered = append(recovered, RecoveredRun{
 			RunID:  item.runID,
 			JobID:  item.jobID,
@@ -1793,10 +1806,13 @@ func (s *Store) RecoverTimedOutRuns(ctx context.Context, batchSize int) ([]Recov
 			return nil, fmt.Errorf("mark timed out run terminal: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO run_events (run_id, event_type, actor_type, payload)
-			VALUES ($1, 'RUN_TIMED_OUT', 'reaper', '{"reason":"timeout"}'::jsonb)
-		`, item.runID); err != nil {
+				INSERT INTO run_events (run_id, event_type, actor_type, payload)
+				VALUES ($1, 'RUN_TIMED_OUT', 'reaper', '{"reason":"timeout"}'::jsonb)
+			`, item.runID); err != nil {
 			return nil, fmt.Errorf("insert run timed out event: %w", err)
+		}
+		if err := disableTerminalOneOffJob(ctx, tx, item.runID, now); err != nil {
+			return nil, err
 		}
 		recovered = append(recovered, RecoveredRun{
 			RunID:  item.runID,
@@ -1824,6 +1840,37 @@ func pqArray(values []string) string {
 	}
 
 	return "{" + strings.Join(quoted, ",") + "}"
+}
+
+func disableTerminalOneOffJob(ctx context.Context, tx *sql.Tx, runID string, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET disabled_at = COALESCE(disabled_at, $2),
+		    updated_at = $2
+		WHERE id = (
+			SELECT job_id
+			FROM runs
+			WHERE id = $1
+		)
+		  AND schedule_type = 'once'
+	`, runID, now); err != nil {
+		return fmt.Errorf("disable terminal one-off job: %w", err)
+	}
+	return nil
+}
+
+func isUniqueViolation(err error, constraint string) bool {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return false
+	}
+	if pqErr.Code != "23505" {
+		return false
+	}
+	if constraint == "" {
+		return true
+	}
+	return pqErr.Constraint == constraint
 }
 
 func parsePQArray(value string) []string {

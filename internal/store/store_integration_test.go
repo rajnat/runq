@@ -293,6 +293,113 @@ func TestCreateJobRejectsDuplicateDedupeKey(t *testing.T) {
 	}
 }
 
+func TestCreateJobAllowsReusingDedupeKeyAfterCompletion(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "dedupe-complete",
+		TenantID:     "tenant-dedupe",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "once",
+		DedupeKey:    "complete-key",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if result.RunID == nil {
+		t.Fatalf("expected run id")
+	}
+
+	worker, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "dedupe-worker",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"test": true},
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING',
+		    worker_id = $2,
+		    lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds',
+		    started_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`, *result.RunID, worker.WorkerID); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+
+	if err := store.CompleteRun(ctx, CompleteRunInput{
+		WorkerID:   worker.WorkerID,
+		RunID:      *result.RunID,
+		LeaseToken: 1,
+		Result:     map[string]any{"status_code": 200},
+	}); err != nil {
+		t.Fatalf("complete run: %v", err)
+	}
+
+	if _, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "dedupe-complete-reuse",
+		TenantID:     "tenant-dedupe",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "once",
+		DedupeKey:    "complete-key",
+	}); err != nil {
+		t.Fatalf("expected dedupe key to be reusable after completion, got %v", err)
+	}
+}
+
+func TestCreateJobAllowsReusingDedupeKeyAfterTerminalFailure(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	runID, workerID := createRunningRun(t, store, ctx, 30, 0)
+
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET tenant_id = 'tenant-dedupe',
+		    dedupe_key = 'failed-key'
+		WHERE id = (SELECT job_id FROM runs WHERE id = $1)
+	`, runID); err != nil {
+		t.Fatalf("set dedupe key: %v", err)
+	}
+
+	if err := store.FailRun(ctx, FailRunInput{
+		WorkerID:     workerID,
+		RunID:        runID,
+		LeaseToken:   1,
+		ErrorCode:    "HTTP_500",
+		ErrorMessage: "terminal failure",
+		Retryable:    false,
+	}); err != nil {
+		t.Fatalf("fail run: %v", err)
+	}
+
+	if _, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "dedupe-failed-reuse",
+		TenantID:     "tenant-dedupe",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "once",
+		DedupeKey:    "failed-key",
+	}); err != nil {
+		t.Fatalf("expected dedupe key to be reusable after failure, got %v", err)
+	}
+}
+
 func TestRegisterWorkerReusesExistingName(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
