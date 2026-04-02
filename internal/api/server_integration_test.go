@@ -144,12 +144,14 @@ func TestTenantQuotaEndpoints(t *testing.T) {
 
 	var upsertResp TenantQuotaResponse
 	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPut, httpServer.URL+"/v1/tenants/tenant-api/quota", map[string]any{
-		"max_inflight": 2,
+		"max_inflight":     2,
+		"max_pending_runs": 4,
+		"max_active_jobs":  6,
 	}, &upsertResp)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200 upsert quota, got %d", status)
 	}
-	if upsertResp.TenantID != "tenant-api" || upsertResp.MaxInflight != 2 {
+	if upsertResp.TenantID != "tenant-api" || upsertResp.MaxInflight != 2 || upsertResp.MaxPendingRuns != 4 || upsertResp.MaxActiveJobs != 6 {
 		t.Fatalf("unexpected upsert response: %+v", upsertResp)
 	}
 
@@ -162,7 +164,7 @@ func TestTenantQuotaEndpoints(t *testing.T) {
 	}
 	found := false
 	for _, quota := range listResp.TenantQuotas {
-		if quota.TenantID == "tenant-api" && quota.MaxInflight == 2 {
+		if quota.TenantID == "tenant-api" && quota.MaxInflight == 2 && quota.MaxPendingRuns == 4 && quota.MaxActiveJobs == 6 {
 			found = true
 			break
 		}
@@ -188,6 +190,9 @@ func TestTenantQuotaEndpoints(t *testing.T) {
 			}
 			if event.Payload["max_inflight"] != float64(2) {
 				t.Fatalf("expected max_inflight payload, got %+v", event.Payload)
+			}
+			if event.Payload["max_pending_runs"] != float64(4) || event.Payload["max_active_jobs"] != float64(6) {
+				t.Fatalf("expected expanded quota payload, got %+v", event.Payload)
 			}
 			break
 		}
@@ -358,8 +363,41 @@ func TestCreateJobRejectsDuplicateDedupeKey(t *testing.T) {
 	}
 }
 
+func TestCreateJobReturnsTooManyRequestsWhenTenantPendingQuotaExceeded(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	if _, err := jobStore.UpsertTenantQuota(ctx, "tenant-api", 0, 1, 0, nil); err != nil {
+		t.Fatalf("upsert tenant quota: %v", err)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	payload := map[string]any{
+		"name":      "quota-first",
+		"tenant_id": "tenant-api",
+		"queue":     "default",
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/task"},
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", payload, &map[string]any{})
+	if status != http.StatusAccepted {
+		t.Fatalf("expected first create accepted, got %d", status)
+	}
+
+	payload["name"] = "quota-second"
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", payload, &map[string]any{})
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on pending quota exceed, got %d", status)
+	}
+}
+
 func TestCreateJobAndListJobsRoundTripConcurrencyKey(t *testing.T) {
 	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
 
 	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
@@ -402,6 +440,7 @@ func TestCreateJobAndListJobsRoundTripConcurrencyKey(t *testing.T) {
 
 func TestPauseResumeAndTriggerJobEndpoints(t *testing.T) {
 	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
 	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()

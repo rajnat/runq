@@ -246,11 +246,11 @@ func TestUpsertAndListTenantQuotas(t *testing.T) {
 	resetTables(t, store)
 
 	tenantID := "tenant-store-" + time.Now().UTC().Format("150405.000000000")
-	quota, err := store.UpsertTenantQuota(ctx, tenantID, 3, nil)
+	quota, err := store.UpsertTenantQuota(ctx, tenantID, 3, 5, 7, nil)
 	if err != nil {
 		t.Fatalf("upsert tenant quota: %v", err)
 	}
-	if quota.TenantID != tenantID || quota.MaxInflight != 3 {
+	if quota.TenantID != tenantID || quota.MaxInflight != 3 || quota.MaxPendingRuns != 5 || quota.MaxActiveJobs != 7 {
 		t.Fatalf("unexpected upsert result: %+v", quota)
 	}
 
@@ -260,13 +260,112 @@ func TestUpsertAndListTenantQuotas(t *testing.T) {
 	}
 	found := false
 	for _, item := range quotas {
-		if item.TenantID == tenantID && item.MaxInflight == 3 {
+		if item.TenantID == tenantID && item.MaxInflight == 3 && item.MaxPendingRuns == 5 && item.MaxActiveJobs == 7 {
 			found = true
 			break
 		}
 	}
 	if !found {
 		t.Fatalf("unexpected tenant quotas: %+v", quotas)
+	}
+}
+
+func TestCreateJobRespectsTenantActiveJobQuota(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	if _, err := store.UpsertTenantQuota(ctx, "tenant-admission", 0, 0, 1, nil); err != nil {
+		t.Fatalf("upsert tenant quota: %v", err)
+	}
+
+	if _, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "first-job",
+		TenantID:     "tenant-admission",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	}); err != nil {
+		t.Fatalf("create first job: %v", err)
+	}
+
+	if _, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "second-job",
+		TenantID:     "tenant-admission",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	}); err != ErrQuotaExceeded {
+		t.Fatalf("expected ErrQuotaExceeded for active job admission, got %v", err)
+	}
+}
+
+func TestCreateJobRespectsTenantPendingRunQuota(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	if _, err := store.UpsertTenantQuota(ctx, "tenant-backlog", 0, 1, 0, nil); err != nil {
+		t.Fatalf("upsert tenant quota: %v", err)
+	}
+
+	if _, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "first-once",
+		TenantID:     "tenant-backlog",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "once",
+	}); err != nil {
+		t.Fatalf("create first once job: %v", err)
+	}
+
+	if _, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "second-once",
+		TenantID:     "tenant-backlog",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "once",
+	}); err != ErrQuotaExceeded {
+		t.Fatalf("expected ErrQuotaExceeded for pending-run admission, got %v", err)
+	}
+}
+
+func TestTriggerJobRespectsTenantPendingRunQuota(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	if _, err := store.UpsertTenantQuota(ctx, "tenant-trigger-quota", 0, 1, 0, nil); err != nil {
+		t.Fatalf("upsert tenant quota: %v", err)
+	}
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "cron-job",
+		TenantID:     "tenant-trigger-quota",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+
+	if _, err := store.TriggerJob(ctx, result.JobID, nil); err != nil {
+		t.Fatalf("first trigger: %v", err)
+	}
+	if _, err := store.TriggerJob(ctx, result.JobID, nil); err != ErrQuotaExceeded {
+		t.Fatalf("expected ErrQuotaExceeded on second trigger, got %v", err)
 	}
 }
 

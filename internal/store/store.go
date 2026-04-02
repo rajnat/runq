@@ -24,6 +24,7 @@ type Store struct {
 
 var ErrConflict = errors.New("state conflict")
 var ErrAlreadyExists = errors.New("already exists")
+var ErrQuotaExceeded = errors.New("tenant quota exceeded")
 
 type CreateJobInput struct {
 	Name                    string
@@ -121,9 +122,11 @@ type ClaimSummary struct {
 }
 
 type TenantQuota struct {
-	TenantID    string    `json:"tenant_id"`
-	MaxInflight int       `json:"max_inflight"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	TenantID       string    `json:"tenant_id"`
+	MaxInflight    int       `json:"max_inflight"`
+	MaxPendingRuns int       `json:"max_pending_runs"`
+	MaxActiveJobs  int       `json:"max_active_jobs"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type AuditEvent struct {
@@ -318,6 +321,16 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 		return CreateJobResult{}, err
 	}
 	tenantID := defaultTenantID(input.TenantID)
+	if err := lockTenantQuotaScope(ctx, tx, tenantID); err != nil {
+		return CreateJobResult{}, err
+	}
+	quota, err := loadTenantQuota(ctx, tx, tenantID)
+	if err != nil {
+		return CreateJobResult{}, err
+	}
+	if err := enforceTenantJobAdmission(ctx, tx, tenantID, quota, input.ScheduleType == "once"); err != nil {
+		return CreateJobResult{}, err
+	}
 
 	if strings.TrimSpace(input.DedupeKey) != "" {
 		var existingJobID string
@@ -773,6 +786,16 @@ func (s *Store) TriggerJob(ctx context.Context, jobID string, audit *AuditEventI
 	if scheduleType != "cron" || disabled || paused {
 		return "", ErrConflict
 	}
+	if err := lockTenantQuotaScope(ctx, tx, tenantID); err != nil {
+		return "", err
+	}
+	quota, err := loadTenantQuota(ctx, tx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	if err := enforceTenantPendingRunAdmission(ctx, tx, tenantID, quota); err != nil {
+		return "", err
+	}
 
 	runID, err := newID("run")
 	if err != nil {
@@ -843,6 +866,16 @@ func (s *Store) RequeueRun(ctx context.Context, runID string, audit *AuditEventI
 
 	if source.jobDisabled && source.scheduleType != "once" {
 		return "", ErrConflict
+	}
+	if err := lockTenantQuotaScope(ctx, tx, source.tenantID); err != nil {
+		return "", err
+	}
+	quota, err := loadTenantQuota(ctx, tx, source.tenantID)
+	if err != nil {
+		return "", err
+	}
+	if err := enforceTenantPendingRunAdmission(ctx, tx, source.tenantID, quota); err != nil {
+		return "", err
 	}
 	switch source.status {
 	case "FAILED", "TIMED_OUT", "CANCELED":
@@ -1088,12 +1121,14 @@ func (s *Store) GetWorker(ctx context.Context, workerID string) (Worker, error) 
 	return worker, nil
 }
 
-func (s *Store) UpsertTenantQuota(ctx context.Context, tenantID string, maxInflight int, audit *AuditEventInput) (TenantQuota, error) {
+func (s *Store) UpsertTenantQuota(ctx context.Context, tenantID string, maxInflight, maxPendingRuns, maxActiveJobs int, audit *AuditEventInput) (TenantQuota, error) {
 	ctx, span := observability.Tracer("runq/store").Start(ctx, "store.upsert_tenant_quota")
 	defer span.End()
 	span.SetAttributes(
 		attribute.String("runq.tenant_id", defaultTenantID(tenantID)),
 		attribute.Int("runq.max_inflight", maxInflight),
+		attribute.Int("runq.max_pending_runs", maxPendingRuns),
+		attribute.Int("runq.max_active_jobs", maxActiveJobs),
 	)
 
 	tenantID = defaultTenantID(tenantID)
@@ -1106,13 +1141,15 @@ func (s *Store) UpsertTenantQuota(ctx context.Context, tenantID string, maxInfli
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO tenant_quotas (tenant_id, max_inflight, updated_at)
-		VALUES ($1, $2, $3)
+		INSERT INTO tenant_quotas (tenant_id, max_inflight, max_pending_runs, max_active_jobs, updated_at)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (tenant_id)
 		DO UPDATE SET
 			max_inflight = EXCLUDED.max_inflight,
+			max_pending_runs = EXCLUDED.max_pending_runs,
+			max_active_jobs = EXCLUDED.max_active_jobs,
 			updated_at = EXCLUDED.updated_at
-	`, tenantID, maxInflight, now)
+	`, tenantID, maxInflight, maxPendingRuns, maxActiveJobs, now)
 	if err != nil {
 		return TenantQuota{}, fmt.Errorf("upsert tenant quota: %w", err)
 	}
@@ -1126,15 +1163,17 @@ func (s *Store) UpsertTenantQuota(ctx context.Context, tenantID string, maxInfli
 	}
 
 	return TenantQuota{
-		TenantID:    tenantID,
-		MaxInflight: maxInflight,
-		UpdatedAt:   now,
+		TenantID:       tenantID,
+		MaxInflight:    maxInflight,
+		MaxPendingRuns: maxPendingRuns,
+		MaxActiveJobs:  maxActiveJobs,
+		UpdatedAt:      now,
 	}, nil
 }
 
 func (s *Store) ListTenantQuotas(ctx context.Context) ([]TenantQuota, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tenant_id, max_inflight, updated_at
+		SELECT tenant_id, max_inflight, max_pending_runs, max_active_jobs, updated_at
 		FROM tenant_quotas
 		ORDER BY tenant_id ASC
 	`)
@@ -1146,7 +1185,7 @@ func (s *Store) ListTenantQuotas(ctx context.Context) ([]TenantQuota, error) {
 	quotas := make([]TenantQuota, 0)
 	for rows.Next() {
 		var quota TenantQuota
-		if err := rows.Scan(&quota.TenantID, &quota.MaxInflight, &quota.UpdatedAt); err != nil {
+		if err := rows.Scan(&quota.TenantID, &quota.MaxInflight, &quota.MaxPendingRuns, &quota.MaxActiveJobs, &quota.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan tenant quota: %w", err)
 		}
 		quotas = append(quotas, quota)
@@ -2268,6 +2307,75 @@ func normalizeStatuses(values []string) []string {
 
 func concurrencyScopeKey(tenantID, concurrencyKey string) string {
 	return defaultTenantID(tenantID) + "\x00" + strings.TrimSpace(concurrencyKey)
+}
+
+func lockTenantQuotaScope(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, defaultTenantID(tenantID)); err != nil {
+		return fmt.Errorf("lock tenant quota scope: %w", err)
+	}
+	return nil
+}
+
+func loadTenantQuota(ctx context.Context, tx *sql.Tx, tenantID string) (TenantQuota, error) {
+	tenantID = defaultTenantID(tenantID)
+	var quota TenantQuota
+	err := tx.QueryRowContext(ctx, `
+		SELECT tenant_id, max_inflight, max_pending_runs, max_active_jobs, updated_at
+		FROM tenant_quotas
+		WHERE tenant_id = $1
+	`, tenantID).Scan(&quota.TenantID, &quota.MaxInflight, &quota.MaxPendingRuns, &quota.MaxActiveJobs, &quota.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return TenantQuota{TenantID: tenantID}, nil
+		}
+		return TenantQuota{}, fmt.Errorf("load tenant quota: %w", err)
+	}
+	return quota, nil
+}
+
+func enforceTenantJobAdmission(ctx context.Context, tx *sql.Tx, tenantID string, quota TenantQuota, creatingPendingRun bool) error {
+	tenantID = defaultTenantID(tenantID)
+	if quota.MaxActiveJobs > 0 {
+		var activeJobs int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM jobs
+			WHERE tenant_id = $1
+			  AND disabled_at IS NULL
+		`, tenantID).Scan(&activeJobs); err != nil {
+			return fmt.Errorf("count active jobs: %w", err)
+		}
+		if activeJobs >= quota.MaxActiveJobs {
+			return ErrQuotaExceeded
+		}
+	}
+	if creatingPendingRun {
+		if err := enforceTenantPendingRunAdmission(ctx, tx, tenantID, quota); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func enforceTenantPendingRunAdmission(ctx context.Context, tx *sql.Tx, tenantID string, quota TenantQuota) error {
+	tenantID = defaultTenantID(tenantID)
+	if quota.MaxPendingRuns <= 0 {
+		return nil
+	}
+	var pendingRuns int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM runs r
+		JOIN jobs j ON j.id = r.job_id
+		WHERE j.tenant_id = $1
+		  AND r.status = 'PENDING'
+	`, tenantID).Scan(&pendingRuns); err != nil {
+		return fmt.Errorf("count pending runs: %w", err)
+	}
+	if pendingRuns >= quota.MaxPendingRuns {
+		return ErrQuotaExceeded
+	}
+	return nil
 }
 
 func containsString(items []string, target string) bool {

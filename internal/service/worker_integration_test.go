@@ -465,7 +465,7 @@ func TestSchedulerEmitsTenantLimitMetrics(t *testing.T) {
 	}
 
 	metrics := observability.NewRegistry()
-	_, err = jobStore.UpsertTenantQuota(ctx, "tenant-a", 1, nil)
+	_, err = jobStore.UpsertTenantQuota(ctx, "tenant-a", 1, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("upsert tenant quota: %v", err)
 	}

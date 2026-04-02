@@ -128,13 +128,17 @@ type TriggerJobResponse struct {
 }
 
 type UpsertTenantQuotaRequest struct {
-	MaxInflight int `json:"max_inflight"`
+	MaxInflight    int `json:"max_inflight"`
+	MaxPendingRuns int `json:"max_pending_runs"`
+	MaxActiveJobs  int `json:"max_active_jobs"`
 }
 
 type TenantQuotaResponse struct {
-	TenantID    string `json:"tenant_id"`
-	MaxInflight int    `json:"max_inflight"`
-	UpdatedAt   string `json:"updated_at"`
+	TenantID       string `json:"tenant_id"`
+	MaxInflight    int    `json:"max_inflight"`
+	MaxPendingRuns int    `json:"max_pending_runs"`
+	MaxActiveJobs  int    `json:"max_active_jobs"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 type ListAuditEventsResponse struct {
@@ -222,8 +226,17 @@ func (r FailRunRequest) Validate() error {
 }
 
 func (r UpsertTenantQuotaRequest) Validate() error {
-	if r.MaxInflight <= 0 {
-		return errors.New("max_inflight must be greater than zero")
+	if r.MaxInflight < 0 {
+		return errors.New("max_inflight must be zero or greater")
+	}
+	if r.MaxPendingRuns < 0 {
+		return errors.New("max_pending_runs must be zero or greater")
+	}
+	if r.MaxActiveJobs < 0 {
+		return errors.New("max_active_jobs must be zero or greater")
+	}
+	if r.MaxInflight == 0 && r.MaxPendingRuns == 0 && r.MaxActiveJobs == 0 {
+		return errors.New("at least one tenant quota limit must be greater than zero")
 	}
 	return nil
 }

@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS workers (
 CREATE TABLE IF NOT EXISTS tenant_quotas (
     tenant_id TEXT PRIMARY KEY,
     max_inflight INTEGER NOT NULL,
+    max_pending_runs INTEGER NOT NULL DEFAULT 0,
+    max_active_jobs INTEGER NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

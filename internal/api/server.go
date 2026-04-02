@@ -285,6 +285,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "JOB_ALREADY_EXISTS", "an active job with this dedupe key already exists")
 			return
 		}
+		if errors.Is(err, store.ErrQuotaExceeded) {
+			writeError(w, http.StatusTooManyRequests, "TENANT_QUOTA_EXCEEDED", "tenant quota exceeded for job admission")
+			return
+		}
 		s.logger.Printf("create job failed: %v", err)
 		s.metrics.IncCounter("runq_api_job_create_errors_total")
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to create job")
@@ -458,6 +462,8 @@ func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
 		case errors.Is(err, store.ErrConflict):
 			writeError(w, http.StatusConflict, "JOB_TRIGGER_CONFLICT", "job cannot be triggered in its current state")
+		case errors.Is(err, store.ErrQuotaExceeded):
+			writeError(w, http.StatusTooManyRequests, "TENANT_QUOTA_EXCEEDED", "tenant quota exceeded for pending run admission")
 		default:
 			s.logger.Printf("trigger job failed: %v", err)
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to trigger job")
@@ -491,9 +497,11 @@ func (s *Server) handleListTenantQuotas(w http.ResponseWriter, r *http.Request) 
 	response := make([]TenantQuotaResponse, 0, len(quotas))
 	for _, quota := range quotas {
 		response = append(response, TenantQuotaResponse{
-			TenantID:    quota.TenantID,
-			MaxInflight: quota.MaxInflight,
-			UpdatedAt:   quota.UpdatedAt.Format(time.RFC3339),
+			TenantID:       quota.TenantID,
+			MaxInflight:    quota.MaxInflight,
+			MaxPendingRuns: quota.MaxPendingRuns,
+			MaxActiveJobs:  quota.MaxActiveJobs,
+			UpdatedAt:      quota.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 
@@ -561,8 +569,10 @@ func (s *Server) handleUpsertTenantQuota(w http.ResponseWriter, r *http.Request)
 	}
 
 	tenantID := r.PathValue("tenantID")
-	quota, err := s.store.UpsertTenantQuota(ctx, tenantID, req.MaxInflight, s.auditInput(principal, "TENANT_QUOTA_UPSERT", "tenant_quota", tenantID, tenantID, map[string]any{
-		"max_inflight": req.MaxInflight,
+	quota, err := s.store.UpsertTenantQuota(ctx, tenantID, req.MaxInflight, req.MaxPendingRuns, req.MaxActiveJobs, s.auditInput(principal, "TENANT_QUOTA_UPSERT", "tenant_quota", tenantID, tenantID, map[string]any{
+		"max_inflight":     req.MaxInflight,
+		"max_pending_runs": req.MaxPendingRuns,
+		"max_active_jobs":  req.MaxActiveJobs,
 	}))
 	if err != nil {
 		s.logger.Printf("upsert tenant quota failed: %v", err)
@@ -571,9 +581,11 @@ func (s *Server) handleUpsertTenantQuota(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, TenantQuotaResponse{
-		TenantID:    quota.TenantID,
-		MaxInflight: quota.MaxInflight,
-		UpdatedAt:   quota.UpdatedAt.Format(time.RFC3339),
+		TenantID:       quota.TenantID,
+		MaxInflight:    quota.MaxInflight,
+		MaxPendingRuns: quota.MaxPendingRuns,
+		MaxActiveJobs:  quota.MaxActiveJobs,
+		UpdatedAt:      quota.UpdatedAt.Format(time.RFC3339),
 	})
 }
 
@@ -693,6 +705,8 @@ func (s *Server) handleRequeueRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
 		case errors.Is(err, store.ErrConflict):
 			writeError(w, http.StatusConflict, "RUN_REQUEUE_CONFLICT", "run cannot be requeued in its current state")
+		case errors.Is(err, store.ErrQuotaExceeded):
+			writeError(w, http.StatusTooManyRequests, "TENANT_QUOTA_EXCEEDED", "tenant quota exceeded for pending run admission")
 		default:
 			s.logger.Printf("requeue run failed: %v", err)
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to requeue run")
@@ -750,6 +764,8 @@ func (s *Server) handleRedriveRun(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
 		case errors.Is(err, store.ErrConflict):
 			writeError(w, http.StatusConflict, "RUN_REDRIVE_CONFLICT", "run cannot be redriven in its current state")
+		case errors.Is(err, store.ErrQuotaExceeded):
+			writeError(w, http.StatusTooManyRequests, "TENANT_QUOTA_EXCEEDED", "tenant quota exceeded for pending run admission")
 		default:
 			s.logger.Printf("redrive run failed: %v", err)
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to redrive run")
