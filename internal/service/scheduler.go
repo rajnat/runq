@@ -80,30 +80,14 @@ func (s *Scheduler) tick(ctx context.Context) error {
 	s.metrics.AddCounterVec("runq_scheduler_skipped_runs_total", map[string]string{"reason": "no_capacity"}, float64(summary.SkippedNoCapacity))
 	s.metrics.AddCounterVec("runq_scheduler_skipped_runs_total", map[string]string{"reason": "no_worker"}, float64(summary.SkippedNoEligibleWorker))
 	s.metrics.AddCounterVec("runq_scheduler_skipped_runs_total", map[string]string{"reason": "tenant_limit"}, float64(summary.SkippedTenantLimit))
-	for tenantID, count := range summary.TenantCandidates {
-		s.metrics.SetGaugeVec("runq_scheduler_tenant_runs", map[string]string{"tenant": tenantID, "state": "candidate"}, float64(count))
-	}
-	for tenantID, count := range summary.TenantAssigned {
-		s.metrics.SetGaugeVec("runq_scheduler_tenant_runs", map[string]string{"tenant": tenantID, "state": "assigned"}, float64(count))
-	}
-	for tenantID, count := range summary.TenantSkipped {
-		s.metrics.SetGaugeVec("runq_scheduler_tenant_runs", map[string]string{"tenant": tenantID, "state": "skipped"}, float64(count))
-	}
-	for tenantID, count := range summary.TenantInflight {
-		s.metrics.SetGaugeVec("runq_scheduler_tenant_runs", map[string]string{"tenant": tenantID, "state": "inflight"}, float64(count))
-	}
-	for tenantID, count := range summary.TenantQuota {
-		s.metrics.SetGaugeVec("runq_scheduler_tenant_quota", map[string]string{"tenant": tenantID}, float64(count))
-	}
-	for queue, count := range summary.QueueCandidates {
-		s.metrics.SetGaugeVec("runq_scheduler_queue_runs", map[string]string{"queue": queue, "state": "candidate"}, float64(count))
-	}
-	for queue, count := range summary.QueueAssigned {
-		s.metrics.SetGaugeVec("runq_scheduler_queue_runs", map[string]string{"queue": queue, "state": "assigned"}, float64(count))
-	}
-	for queue, count := range summary.QueueSkipped {
-		s.metrics.SetGaugeVec("runq_scheduler_queue_runs", map[string]string{"queue": queue, "state": "skipped"}, float64(count))
-	}
+	s.metrics.SetGaugeVec("runq_scheduler_tenant_groups_last_tick", map[string]string{"state": "candidate"}, float64(len(summary.TenantCandidates)))
+	s.metrics.SetGaugeVec("runq_scheduler_tenant_groups_last_tick", map[string]string{"state": "assigned"}, float64(len(summary.TenantAssigned)))
+	s.metrics.SetGaugeVec("runq_scheduler_tenant_groups_last_tick", map[string]string{"state": "skipped"}, float64(len(summary.TenantSkipped)))
+	s.metrics.SetGaugeVec("runq_scheduler_tenant_groups_last_tick", map[string]string{"state": "inflight"}, float64(len(summary.TenantInflight)))
+	s.metrics.SetGaugeVec("runq_scheduler_tenant_groups_last_tick", map[string]string{"state": "quota_configured"}, float64(len(summary.TenantQuota)))
+	s.metrics.SetGaugeVec("runq_scheduler_queue_groups_last_tick", map[string]string{"state": "candidate"}, float64(len(summary.QueueCandidates)))
+	s.metrics.SetGaugeVec("runq_scheduler_queue_groups_last_tick", map[string]string{"state": "assigned"}, float64(len(summary.QueueAssigned)))
+	s.metrics.SetGaugeVec("runq_scheduler_queue_groups_last_tick", map[string]string{"state": "skipped"}, float64(len(summary.QueueSkipped)))
 
 	if len(assignments) == 0 {
 		s.metrics.IncCounter("runq_scheduler_ticks_empty_total")

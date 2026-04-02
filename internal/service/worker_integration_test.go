@@ -405,10 +405,10 @@ func TestSchedulerEmitsPlacementMetrics(t *testing.T) {
 	assertMetricContains(t, rendered, "runq_scheduler_candidate_runs 2")
 	assertMetricContains(t, rendered, "runq_scheduler_saturated_workers 2")
 	assertMetricContains(t, rendered, "runq_scheduler_skipped_runs_total{reason=\"no_capacity\"} 1")
-	assertMetricContains(t, rendered, "runq_scheduler_tenant_runs{state=\"skipped\",tenant=\"tenant-alpha\"} 1")
-	assertMetricContains(t, rendered, "runq_scheduler_tenant_runs{state=\"assigned\",tenant=\"tenant-beta\"} 1")
-	assertMetricContains(t, rendered, "runq_scheduler_queue_runs{queue=\"alpha\",state=\"skipped\"} 1")
-	assertMetricContains(t, rendered, "runq_scheduler_queue_runs{queue=\"beta\",state=\"assigned\"} 1")
+	assertMetricContains(t, rendered, "runq_scheduler_tenant_groups_last_tick{state=\"skipped\"} 1")
+	assertMetricContains(t, rendered, "runq_scheduler_tenant_groups_last_tick{state=\"assigned\"} 1")
+	assertMetricContains(t, rendered, "runq_scheduler_queue_groups_last_tick{state=\"skipped\"} 1")
+	assertMetricContains(t, rendered, "runq_scheduler_queue_groups_last_tick{state=\"assigned\"} 1")
 }
 
 func TestSchedulerEmitsTenantLimitMetrics(t *testing.T) {
@@ -481,9 +481,9 @@ func TestSchedulerEmitsTenantLimitMetrics(t *testing.T) {
 	rendered := metrics.Render()
 	assertMetricContains(t, rendered, "runq_scheduler_skipped_runs_total{reason=\"tenant_limit\"} 1")
 	assertMetricContains(t, rendered, "runq_scheduler_skipped_runs_last_tick{reason=\"tenant_limit\"} 1")
-	assertMetricContains(t, rendered, "runq_scheduler_tenant_runs{state=\"inflight\",tenant=\"tenant-a\"} 1")
-	assertMetricContains(t, rendered, "runq_scheduler_tenant_quota{tenant=\"tenant-a\"} 1")
-	assertMetricContains(t, rendered, "runq_scheduler_tenant_runs{state=\"assigned\",tenant=\"tenant-b\"} 1")
+	assertMetricContains(t, rendered, "runq_scheduler_tenant_groups_last_tick{state=\"inflight\"} 2")
+	assertMetricContains(t, rendered, "runq_scheduler_tenant_groups_last_tick{state=\"quota_configured\"} 2")
+	assertMetricContains(t, rendered, "runq_scheduler_tenant_groups_last_tick{state=\"assigned\"} 1")
 }
 
 func newWorkerTestMux(jobStore *store.Store) http.Handler {

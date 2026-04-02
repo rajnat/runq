@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/eswar/runq/internal/config"
 	"github.com/eswar/runq/internal/observability"
@@ -12,19 +14,21 @@ import (
 
 func main() {
 	cfg := config.LoadWorker()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	logger := log.New(os.Stdout, "worker ", log.LstdFlags|log.LUTC)
 	metrics := observability.NewRegistry()
-	shutdownTracing, err := observability.InitTracing(context.Background(), logger, "runq-worker", cfg.TraceEndpoint)
+	shutdownTracing, err := observability.InitTracing(ctx, logger, "runq-worker", cfg.TraceEndpoint)
 	if err != nil {
 		logger.Fatal(err)
 	}
 	defer func() {
 		_ = shutdownTracing(context.Background())
 	}()
-	observability.RunMetricsServer(context.Background(), logger, cfg.MetricsAddress, metrics)
+	observability.RunMetricsServer(ctx, logger, cfg.MetricsAddress, metrics)
 
 	worker := service.NewWorkerProcess(logger, cfg, metrics)
-	if err := worker.Run(context.Background()); err != nil {
+	if err := worker.Run(ctx); err != nil && err != context.Canceled {
 		logger.Fatal(err)
 	}
 }

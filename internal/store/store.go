@@ -715,6 +715,20 @@ func (s *Store) ListWorkers(ctx context.Context) ([]Worker, error) {
 	return workers, nil
 }
 
+func (s *Store) GetWorker(ctx context.Context, workerID string) (Worker, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, status, max_concurrency, last_heartbeat_at
+		FROM workers
+		WHERE id = $1
+	`, workerID)
+
+	var worker Worker
+	if err := row.Scan(&worker.ID, &worker.Name, &worker.Status, &worker.MaxConcurrency, &worker.LastHeartbeatAt); err != nil {
+		return Worker{}, err
+	}
+	return worker, nil
+}
+
 func (s *Store) UpsertTenantQuota(ctx context.Context, tenantID string, maxInflight int, audit *AuditEventInput) (TenantQuota, error) {
 	ctx, span := observability.Tracer("runq/store").Start(ctx, "store.upsert_tenant_quota")
 	defer span.End()

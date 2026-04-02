@@ -16,11 +16,13 @@ const (
 )
 
 type APIConfig struct {
-	Address        string
-	DBConnString   string
-	AuthTokens     string
-	MetricsAddress string
-	TraceEndpoint  string
+	Address                 string
+	DBConnString            string
+	AuthTokens              string
+	MetricsAddress          string
+	TraceEndpoint           string
+	WorkerHeartbeatInterval time.Duration
+	WorkerLeaseDuration     time.Duration
 }
 
 type ComponentConfig struct {
@@ -55,11 +57,13 @@ type WorkerConfig struct {
 
 func LoadAPI() APIConfig {
 	return APIConfig{
-		Address:        envOrDefault("RUNQ_API_ADDR", defaultAPIAddr),
-		DBConnString:   envOrDefault("RUNQ_DATABASE_URL", defaultDBConnString),
-		AuthTokens:     envOrDefault("RUNQ_API_TOKENS", ""),
-		MetricsAddress: envOrDefault("RUNQ_API_METRICS_ADDR", ":9090"),
-		TraceEndpoint:  envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
+		Address:                 envOrDefault("RUNQ_API_ADDR", defaultAPIAddr),
+		DBConnString:            envOrDefault("RUNQ_DATABASE_URL", defaultDBConnString),
+		AuthTokens:              envOrDefault("RUNQ_API_TOKENS", ""),
+		MetricsAddress:          envOrDefault("RUNQ_API_METRICS_ADDR", ":9090"),
+		TraceEndpoint:           envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
+		WorkerHeartbeatInterval: durationEnvOrDefault("RUNQ_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5*time.Second),
+		WorkerLeaseDuration:     durationEnvOrDefault("RUNQ_LEASE_DURATION_SECONDS", 30*time.Second),
 	}
 }
 

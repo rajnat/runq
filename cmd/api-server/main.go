@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/eswar/runq/internal/api"
 	"github.com/eswar/runq/internal/config"
@@ -13,10 +15,12 @@ import (
 
 func main() {
 	cfg := config.LoadAPI()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	logger := log.New(os.Stdout, "api-server ", log.LstdFlags|log.LUTC)
 	metrics := observability.NewRegistry()
-	shutdownTracing, err := observability.InitTracing(context.Background(), logger, "runq-api-server", cfg.TraceEndpoint)
+	shutdownTracing, err := observability.InitTracing(ctx, logger, "runq-api-server", cfg.TraceEndpoint)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -29,13 +33,13 @@ func main() {
 	}
 	defer jobStore.Close()
 
-	observability.RunMetricsServer(context.Background(), logger, cfg.MetricsAddress, metrics)
+	observability.RunMetricsServer(ctx, logger, cfg.MetricsAddress, metrics)
 
 	server, err := api.NewServer(cfg, logger, jobStore, metrics)
 	if err != nil {
 		logger.Fatal(err)
 	}
-	if err := server.Run(); err != nil {
+	if err := server.Run(ctx); err != nil && err != context.Canceled {
 		logger.Fatal(err)
 	}
 }

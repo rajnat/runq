@@ -314,6 +314,61 @@ func TestNewServerReturnsConfigError(t *testing.T) {
 	}
 }
 
+func TestWorkerTokenCannotRegisterDifferentWorkerName(t *testing.T) {
+	jobStore := openTestStore(t)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "someone-else",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &map[string]any{})
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403 for mismatched worker name, got %d", status)
+	}
+}
+
+func TestWorkerTokenCannotOperateOnAnotherWorkerID(t *testing.T) {
+	jobStore := openTestStore(t)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var workerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &workerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker principal, got %d", status)
+	}
+
+	var otherResp RegisterWorkerResponse
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-other",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &otherResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering other worker, got %d", status)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+otherResp.WorkerID+"/poll", map[string]any{
+		"available_slots": 1,
+	}, &map[string]any{})
+	if status != http.StatusForbidden {
+		t.Fatalf("expected 403 when worker token uses another worker id, got %d", status)
+	}
+}
+
 func doJSONRequest(t *testing.T, client *http.Client, token, method, url string, requestBody any, responseBody any) int {
 	t.Helper()
 
@@ -354,7 +409,9 @@ func doJSONRequest(t *testing.T, client *http.Client, token, method, url string,
 
 func testAPIConfig() config.APIConfig {
 	return config.APIConfig{
-		AuthTokens: adminToken + ":admin," + tenantToken + ":tenant:tenant-api," + workerToken + ":worker",
+		AuthTokens:              adminToken + ":admin," + tenantToken + ":tenant:tenant-api," + workerToken + ":worker:worker-api",
+		WorkerHeartbeatInterval: 5 * time.Second,
+		WorkerLeaseDuration:     30 * time.Second,
 	}
 }
 

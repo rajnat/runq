@@ -48,7 +48,7 @@ func NewServer(cfg config.APIConfig, logger *log.Logger, jobStore *store.Store, 
 	return server, nil
 }
 
-func (s *Server) Run() error {
+func (s *Server) Run(ctx context.Context) error {
 	httpServer := &http.Server{
 		Addr:              s.cfg.Address,
 		Handler:           s.mux,
@@ -56,7 +56,29 @@ func (s *Server) Run() error {
 	}
 
 	s.logger.Printf("starting api server on %s", s.cfg.Address)
-	return httpServer.ListenAndServe()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpServer.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		err := <-errCh
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return ctx.Err()
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
 }
 
 func (s *Server) routes() {
@@ -146,8 +168,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
 	if err := s.store.Ping(ctx); err != nil {
@@ -518,6 +540,10 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+	if principal.Role == roleWorker && req.Name != principal.WorkerName {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker token does not match requested worker identity")
+		return
+	}
 
 	resp, err := s.store.RegisterWorker(ctx, req.ToStoreInput())
 	if err != nil {
@@ -530,8 +556,8 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
 	s.metrics.IncCounter("runq_api_workers_registered_total")
 	writeJSON(w, http.StatusCreated, RegisterWorkerResponse{
 		WorkerID:                  resp.WorkerID,
-		HeartbeatIntervalSeconds:  5,
-		LeaseRenewIntervalSeconds: 10,
+		HeartbeatIntervalSeconds:  int(s.cfg.WorkerHeartbeatInterval / time.Second),
+		LeaseRenewIntervalSeconds: int(s.cfg.WorkerHeartbeatInterval / time.Second),
 	})
 }
 
@@ -547,6 +573,9 @@ func (s *Server) handlePollWorker(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
+	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID")); !ok {
+		return
+	}
 
 	var req PollWorkerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -595,6 +624,9 @@ func (s *Server) handleHeartbeatWorker(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
+	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID")); !ok {
+		return
+	}
 
 	var req HeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -615,7 +647,7 @@ func (s *Server) handleHeartbeatWorker(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if err := s.store.HeartbeatWorker(ctx, r.PathValue("workerID"), items, 30*time.Second); err != nil {
+	if err := s.store.HeartbeatWorker(ctx, r.PathValue("workerID"), items, s.cfg.WorkerLeaseDuration); err != nil {
 		s.logger.Printf("heartbeat worker failed: %v", err)
 		if errors.Is(err, store.ErrConflict) {
 			s.metrics.IncCounter("runq_api_worker_heartbeat_conflicts_total")
@@ -643,6 +675,9 @@ func (s *Server) handleCompleteRun(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
+	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID")); !ok {
+		return
+	}
 
 	var req CompleteRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -688,6 +723,9 @@ func (s *Server) handleFailRun(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
+	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID")); !ok {
+		return
+	}
 
 	var req FailRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -734,6 +772,31 @@ func (s *Server) createJob(ctx context.Context, req CreateJobRequest) (CreateJob
 		RunID:  result.RunID,
 		Status: "accepted",
 	}, nil
+}
+
+func (s *Server) authorizeWorkerIdentity(ctx context.Context, w http.ResponseWriter, principal principal, workerID string) bool {
+	if principal.Role != roleWorker {
+		return true
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	worker, err := s.store.GetWorker(lookupCtx, workerID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "worker not found")
+			return false
+		}
+		s.logger.Printf("load worker failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load worker")
+		return false
+	}
+	if worker.Name != principal.WorkerName {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker token does not match requested worker identity")
+		return false
+	}
+	return true
 }
 
 func authorizedTenantFilter(principal principal, requested string) (string, bool) {

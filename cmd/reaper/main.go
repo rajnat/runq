@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/eswar/runq/internal/config"
 	"github.com/eswar/runq/internal/observability"
@@ -13,9 +15,11 @@ import (
 
 func main() {
 	cfg := config.LoadComponent("reaper")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	logger := log.New(os.Stdout, "reaper ", log.LstdFlags|log.LUTC)
 	metrics := observability.NewRegistry()
-	shutdownTracing, err := observability.InitTracing(context.Background(), logger, "runq-reaper", cfg.TraceEndpoint)
+	shutdownTracing, err := observability.InitTracing(ctx, logger, "runq-reaper", cfg.TraceEndpoint)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -28,10 +32,10 @@ func main() {
 	}
 	defer jobStore.Close()
 
-	observability.RunMetricsServer(context.Background(), logger, cfg.MetricsAddress, metrics)
+	observability.RunMetricsServer(ctx, logger, cfg.MetricsAddress, metrics)
 
 	reaper := service.NewReaper(logger, jobStore, cfg, metrics)
-	if err := reaper.Run(context.Background()); err != nil {
+	if err := reaper.Run(ctx); err != nil && err != context.Canceled {
 		logger.Fatal(err)
 	}
 }

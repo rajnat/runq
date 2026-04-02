@@ -48,7 +48,9 @@ type registerWorkerRequest struct {
 }
 
 type registerWorkerResponse struct {
-	WorkerID string `json:"worker_id"`
+	WorkerID                  string `json:"worker_id"`
+	HeartbeatIntervalSeconds  int    `json:"heartbeat_interval_seconds"`
+	LeaseRenewIntervalSeconds int    `json:"lease_renew_interval_seconds"`
 }
 
 type pollWorkerRequest struct {
@@ -161,6 +163,9 @@ func (w *WorkerProcess) register(ctx context.Context) (string, error) {
 	var resp registerWorkerResponse
 	if err := w.doJSON(ctx, http.MethodPost, "/v1/workers/register", req, &resp); err != nil {
 		return "", err
+	}
+	if interval := serverHeartbeatInterval(resp); interval > 0 {
+		w.cfg.HeartbeatInterval = interval
 	}
 
 	return resp.WorkerID, nil
@@ -511,4 +516,14 @@ func capabilityMap(items []string) map[string]any {
 		capabilities["http"] = true
 	}
 	return capabilities
+}
+
+func serverHeartbeatInterval(resp registerWorkerResponse) time.Duration {
+	if resp.LeaseRenewIntervalSeconds > 0 {
+		return time.Duration(resp.LeaseRenewIntervalSeconds) * time.Second
+	}
+	if resp.HeartbeatIntervalSeconds > 0 {
+		return time.Duration(resp.HeartbeatIntervalSeconds) * time.Second
+	}
+	return 0
 }

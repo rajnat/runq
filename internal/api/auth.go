@@ -18,8 +18,9 @@ const (
 )
 
 type principal struct {
-	Role     principalRole
-	TenantID string
+	Role       principalRole
+	TenantID   string
+	WorkerName string
 }
 
 type contextKey string
@@ -46,9 +47,9 @@ func parseAuthTokens(cfg config.APIConfig) (map[string]principal, error) {
 
 		token := strings.TrimSpace(parts[0])
 		role := principalRole(strings.TrimSpace(parts[1]))
-		tenantID := ""
+		scope := ""
 		if len(parts) == 3 {
-			tenantID = strings.TrimSpace(parts[2])
+			scope = strings.TrimSpace(parts[2])
 		}
 		if token == "" {
 			return nil, fmt.Errorf("empty auth token in entry %q", entry)
@@ -58,13 +59,20 @@ func parseAuthTokens(cfg config.APIConfig) (map[string]principal, error) {
 		default:
 			return nil, fmt.Errorf("invalid auth role %q", role)
 		}
-		if role == roleTenant && tenantID == "" {
+		if role == roleTenant && scope == "" {
 			return nil, fmt.Errorf("tenant role requires tenant id in entry %q", entry)
 		}
-		result[token] = principal{
-			Role:     role,
-			TenantID: tenantID,
+		if role == roleWorker && scope == "" {
+			return nil, fmt.Errorf("worker role requires worker name in entry %q", entry)
 		}
+		p := principal{Role: role}
+		switch role {
+		case roleTenant:
+			p.TenantID = scope
+		case roleWorker:
+			p.WorkerName = scope
+		}
+		result[token] = p
 	}
 
 	return result, nil
