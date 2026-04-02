@@ -19,6 +19,7 @@ type CreateJobRequest struct {
 	TimeoutSeconds          int            `json:"timeout_seconds"`
 	RetryBackoffBaseSeconds int            `json:"retry_backoff_base_seconds"`
 	DedupeKey               string         `json:"dedupe_key,omitempty"`
+	ConcurrencyKey          string         `json:"concurrency_key,omitempty"`
 }
 
 type Schedule struct {
@@ -31,6 +32,12 @@ type CreateJobResponse struct {
 	JobID  string  `json:"job_id"`
 	RunID  *string `json:"run_id"`
 	Status string  `json:"status"`
+}
+
+type AuthMeResponse struct {
+	Role       string  `json:"role"`
+	TenantID   *string `json:"tenant_id,omitempty"`
+	WorkerName *string `json:"worker_name,omitempty"`
 }
 
 type RegisterWorkerRequest struct {
@@ -95,10 +102,29 @@ type GetRunResponse struct {
 	Events []store.RunEvent `json:"events"`
 }
 
+type RequeueRunResponse struct {
+	RunID   string `json:"run_id"`
+	Status  string `json:"status"`
+	JobID   string `json:"job_id"`
+	Source  string `json:"source"`
+	FromRun string `json:"from_run"`
+}
+
 type CancelJobResponse struct {
 	JobID        string `json:"job_id"`
 	Status       string `json:"status"`
 	CanceledRuns int64  `json:"canceled_runs"`
+}
+
+type JobLifecycleResponse struct {
+	JobID  string `json:"job_id"`
+	Status string `json:"status"`
+}
+
+type TriggerJobResponse struct {
+	JobID  string `json:"job_id"`
+	RunID  string `json:"run_id"`
+	Status string `json:"status"`
 }
 
 type UpsertTenantQuotaRequest struct {
@@ -214,6 +240,7 @@ func (r CreateJobRequest) ToStoreInput() store.CreateJobInput {
 		TimeoutSeconds:          defaultInt(r.TimeoutSeconds, 300),
 		RetryBackoffBaseSeconds: defaultInt(r.RetryBackoffBaseSeconds, 5),
 		DedupeKey:               strings.TrimSpace(r.DedupeKey),
+		ConcurrencyKey:          strings.TrimSpace(r.ConcurrencyKey),
 	}
 
 	if r.Schedule == nil {

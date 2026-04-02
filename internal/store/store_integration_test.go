@@ -293,6 +293,33 @@ func TestCreateJobRejectsDuplicateDedupeKey(t *testing.T) {
 	}
 }
 
+func TestCreateJobPersistsConcurrencyKey(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:           "concurrency-job",
+		TenantID:       "tenant-concurrency",
+		Queue:          "test",
+		Kind:           "http",
+		Payload:        map[string]any{"url": "https://example.internal"},
+		ScheduleType:   "once",
+		ConcurrencyKey: "customer-42",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	job, err := store.GetJob(ctx, result.JobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.ConcurrencyKey == nil || *job.ConcurrencyKey != "customer-42" {
+		t.Fatalf("expected concurrency key to persist, got %+v", job)
+	}
+}
+
 func TestCreateJobAllowsReusingDedupeKeyAfterCompletion(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
@@ -397,6 +424,410 @@ func TestCreateJobAllowsReusingDedupeKeyAfterTerminalFailure(t *testing.T) {
 		DedupeKey:    "failed-key",
 	}); err != nil {
 		t.Fatalf("expected dedupe key to be reusable after failure, got %v", err)
+	}
+}
+
+func TestPauseAndResumeJobControlsClaiming(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "pause-job",
+		TenantID:     "tenant-pause",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "pause-worker",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"test": true},
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+
+	if _, err := store.PauseJob(ctx, result.JobID, nil); err != nil {
+		t.Fatalf("pause job: %v", err)
+	}
+
+	assignments, _, err := store.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim while paused: %v", err)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("expected no assignments while paused, got %+v", assignments)
+	}
+
+	if _, err := store.ResumeJob(ctx, result.JobID, nil); err != nil {
+		t.Fatalf("resume job: %v", err)
+	}
+	assignments, _, err = store.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim after resume: %v", err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected one assignment after resume, got %+v", assignments)
+	}
+}
+
+func TestTriggerJobCreatesAdHocRunForCronJob(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "trigger-job",
+		TenantID:     "tenant-trigger",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	runID, err := store.TriggerJob(ctx, result.JobID, nil)
+	if err != nil {
+		t.Fatalf("trigger job: %v", err)
+	}
+	run, events, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get triggered run: %v", err)
+	}
+	if run.Status != "PENDING" || run.ScheduleType != "cron" {
+		t.Fatalf("expected ad hoc pending cron run, got %+v", run)
+	}
+	if !containsEvent(events, "RUN_CREATED") {
+		t.Fatalf("expected run created event, got %+v", events)
+	}
+}
+
+func TestTerminalFailureMarksRunDeadLettered(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	runID, workerID := createRunningRun(t, store, ctx, 30, 0)
+	if err := store.FailRun(ctx, FailRunInput{
+		WorkerID:     workerID,
+		RunID:        runID,
+		LeaseToken:   1,
+		ErrorCode:    "HTTP_500",
+		ErrorMessage: "terminal failure",
+		Retryable:    false,
+	}); err != nil {
+		t.Fatalf("fail run: %v", err)
+	}
+
+	run, _, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if run.DeadLetteredAt == nil || run.DeadLetterReason == nil || *run.DeadLetterReason != "worker_failed" {
+		t.Fatalf("expected dead-letter metadata, got %+v", run)
+	}
+
+	deadLettered := true
+	runs, err := store.ListRuns(ctx, RunFilter{TenantID: run.TenantID, DeadLettered: &deadLettered})
+	if err != nil {
+		t.Fatalf("list dead-lettered runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != runID {
+		t.Fatalf("expected dead-lettered run in filtered list, got %+v", runs)
+	}
+}
+
+func TestRequeueRunCreatesNewPendingRunForFailedRun(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	runID, workerID := createRunningRun(t, store, ctx, 30, 0)
+	if err := store.FailRun(ctx, FailRunInput{
+		WorkerID:     workerID,
+		RunID:        runID,
+		LeaseToken:   1,
+		ErrorCode:    "HTTP_500",
+		ErrorMessage: "terminal failure",
+		Retryable:    false,
+	}); err != nil {
+		t.Fatalf("fail run: %v", err)
+	}
+
+	newRunID, err := store.RequeueRun(ctx, runID, nil)
+	if err != nil {
+		t.Fatalf("requeue run: %v", err)
+	}
+	if newRunID == "" || newRunID == runID {
+		t.Fatalf("expected a fresh run id, got %q", newRunID)
+	}
+
+	original, _, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get original run: %v", err)
+	}
+	if original.Status != "FAILED" {
+		t.Fatalf("expected original run to remain failed, got %+v", original)
+	}
+
+	requeued, events, err := store.GetRun(ctx, newRunID)
+	if err != nil {
+		t.Fatalf("get requeued run: %v", err)
+	}
+	if requeued.Status != "PENDING" || requeued.Attempt != 0 {
+		t.Fatalf("expected new pending attempt 0 run, got %+v", requeued)
+	}
+	if requeued.JobID != original.JobID {
+		t.Fatalf("expected requeued run to keep same job id, got %+v", requeued)
+	}
+	if len(events) == 0 || events[0].EventType != "RUN_CREATED" {
+		t.Fatalf("expected RUN_CREATED event on new run, got %+v", events)
+	}
+	if events[0].Payload["source_run_id"] != runID {
+		t.Fatalf("expected source_run_id on new run event, got %+v", events[0].Payload)
+	}
+}
+
+func TestRequeueRunCreatesAdHocRunForTimedOutCronJob(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "cron-requeue",
+		TenantID:     "tenant-cron",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+	_, err = store.db.ExecContext(ctx, `UPDATE job_schedules SET next_run_at = NOW() - INTERVAL '1 second' WHERE job_id = $1`, result.JobID)
+	if err != nil {
+		t.Fatalf("set due schedule: %v", err)
+	}
+	if _, err := store.MaterializeDueRuns(ctx, 1); err != nil {
+		t.Fatalf("materialize due runs: %v", err)
+	}
+
+	runs, err := store.ListRuns(ctx, RunFilter{JobID: result.JobID})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 materialized run, got %+v", runs)
+	}
+
+	worker, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "cron-worker",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "cron"},
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING',
+		    worker_id = $2,
+		    lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds',
+		    started_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`, runs[0].ID, worker.WorkerID); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE job_schedules SET next_run_at = NOW() + INTERVAL '10 minutes' WHERE job_id = $1`, result.JobID); err != nil {
+		t.Fatalf("set future schedule: %v", err)
+	}
+
+	if err := store.FailRun(ctx, FailRunInput{
+		WorkerID:     worker.WorkerID,
+		RunID:        runs[0].ID,
+		LeaseToken:   1,
+		ErrorCode:    "HTTP_500",
+		ErrorMessage: "terminal failure",
+		Retryable:    false,
+	}); err != nil {
+		t.Fatalf("fail cron run: %v", err)
+	}
+
+	var nextRunAtBefore time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT next_run_at FROM job_schedules WHERE job_id = $1`, result.JobID).Scan(&nextRunAtBefore); err != nil {
+		t.Fatalf("load schedule before requeue: %v", err)
+	}
+
+	newRunID, err := store.RequeueRun(ctx, runs[0].ID, nil)
+	if err != nil {
+		t.Fatalf("requeue cron run: %v", err)
+	}
+
+	var nextRunAtAfter time.Time
+	if err := store.db.QueryRowContext(ctx, `SELECT next_run_at FROM job_schedules WHERE job_id = $1`, result.JobID).Scan(&nextRunAtAfter); err != nil {
+		t.Fatalf("load schedule after requeue: %v", err)
+	}
+	if !nextRunAtAfter.Equal(nextRunAtBefore) {
+		t.Fatalf("expected requeue to keep cron schedule unchanged, before=%s after=%s", nextRunAtBefore, nextRunAtAfter)
+	}
+
+	requeued, _, err := store.GetRun(ctx, newRunID)
+	if err != nil {
+		t.Fatalf("get requeued cron run: %v", err)
+	}
+	if requeued.ScheduleType != "cron" || requeued.Status != "PENDING" {
+		t.Fatalf("expected ad hoc pending cron run, got %+v", requeued)
+	}
+}
+
+func TestRequeueRunRejectsSucceededRun(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "succeeded-requeue",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+	_, err = store.db.ExecContext(ctx, `UPDATE job_schedules SET next_run_at = NOW() - INTERVAL '1 second' WHERE job_id = $1`, result.JobID)
+	if err != nil {
+		t.Fatalf("set due schedule: %v", err)
+	}
+	if _, err := store.MaterializeDueRuns(ctx, 1); err != nil {
+		t.Fatalf("materialize due runs: %v", err)
+	}
+	runs, err := store.ListRuns(ctx, RunFilter{JobID: result.JobID})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+
+	worker, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "success-worker",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "success"},
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING',
+		    worker_id = $2,
+		    lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds',
+		    started_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`, runs[0].ID, worker.WorkerID); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	if err := store.CompleteRun(ctx, CompleteRunInput{
+		WorkerID:   worker.WorkerID,
+		RunID:      runs[0].ID,
+		LeaseToken: 1,
+		Result:     map[string]any{"status_code": 200},
+	}); err != nil {
+		t.Fatalf("complete run: %v", err)
+	}
+
+	if _, err := store.RequeueRun(ctx, runs[0].ID, nil); err != ErrConflict {
+		t.Fatalf("expected ErrConflict requeueing succeeded run, got %v", err)
+	}
+}
+
+func TestRequeueRunRejectsDisabledJob(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "disabled-requeue",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+	_, err = store.db.ExecContext(ctx, `UPDATE job_schedules SET next_run_at = NOW() - INTERVAL '1 second' WHERE job_id = $1`, result.JobID)
+	if err != nil {
+		t.Fatalf("set due schedule: %v", err)
+	}
+	if _, err := store.MaterializeDueRuns(ctx, 1); err != nil {
+		t.Fatalf("materialize due runs: %v", err)
+	}
+	runs, err := store.ListRuns(ctx, RunFilter{JobID: result.JobID})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+
+	worker, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "disabled-worker",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "disabled"},
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING',
+		    worker_id = $2,
+		    lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds',
+		    started_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`, runs[0].ID, worker.WorkerID); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	if err := store.FailRun(ctx, FailRunInput{
+		WorkerID:     worker.WorkerID,
+		RunID:        runs[0].ID,
+		LeaseToken:   1,
+		ErrorCode:    "HTTP_500",
+		ErrorMessage: "terminal failure",
+		Retryable:    false,
+	}); err != nil {
+		t.Fatalf("fail run: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE jobs SET disabled_at = NOW(), updated_at = NOW() WHERE id = $1`, result.JobID); err != nil {
+		t.Fatalf("disable job: %v", err)
+	}
+
+	if _, err := store.RequeueRun(ctx, runs[0].ID, nil); err != ErrConflict {
+		t.Fatalf("expected ErrConflict requeueing disabled job run, got %v", err)
 	}
 }
 
@@ -607,6 +1038,117 @@ func TestClaimPendingRunsRespectsWorkerMaxConcurrency(t *testing.T) {
 	}
 	if runningCount != 1 || pendingCount != 2 {
 		t.Fatalf("expected 1 RUNNING and 2 PENDING runs, got running=%d pending=%d", runningCount, pendingCount)
+	}
+}
+
+func TestClaimPendingRunsSkipsConcurrentRunsWithSameConcurrencyKey(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	for i := 0; i < 2; i++ {
+		_, err := store.CreateJob(ctx, CreateJobInput{
+			Name:           "serialized-job",
+			TenantID:       "tenant-serial",
+			Queue:          "test",
+			Kind:           "http",
+			Payload:        map[string]any{"url": "https://example.internal/task"},
+			ScheduleType:   "once",
+			ConcurrencyKey: "account-7",
+		})
+		if err != nil {
+			t.Fatalf("create job %d: %v", i, err)
+		}
+	}
+
+	_, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "serial-worker-a",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 2,
+		Metadata:       map[string]any{"pool": "a"},
+	})
+	if err != nil {
+		t.Fatalf("register first worker: %v", err)
+	}
+	_, err = store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "serial-worker-b",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 2,
+		Metadata:       map[string]any{"pool": "b"},
+	})
+	if err != nil {
+		t.Fatalf("register second worker: %v", err)
+	}
+
+	assignments, summary, err := store.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim pending runs: %v", err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected only one assignment for shared concurrency key, got %d", len(assignments))
+	}
+	if summary.SkippedConcurrencyLimit != 1 {
+		t.Fatalf("expected one concurrency skip, got %+v", summary)
+	}
+
+	runs, err := store.ListRuns(ctx, RunFilter{TenantID: "tenant-serial"})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	runningCount := 0
+	pendingCount := 0
+	for _, run := range runs {
+		switch run.Status {
+		case "RUNNING":
+			runningCount++
+		case "PENDING":
+			pendingCount++
+		}
+	}
+	if runningCount != 1 || pendingCount != 1 {
+		t.Fatalf("expected one running and one pending run, got running=%d pending=%d", runningCount, pendingCount)
+	}
+}
+
+func TestClaimPendingRunsSkipsWhenConcurrencyKeyAlreadyRunning(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	activeRunID, _ := createRunningRun(t, store, ctx, 30, 0)
+	if _, err := store.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET tenant_id = 'tenant-shared',
+		    concurrency_key = 'account-9'
+		WHERE id = (SELECT job_id FROM runs WHERE id = $1)
+	`, activeRunID); err != nil {
+		t.Fatalf("set active concurrency key: %v", err)
+	}
+
+	_, err := store.CreateJob(ctx, CreateJobInput{
+		Name:           "queued-serialized-job",
+		TenantID:       "tenant-shared",
+		Queue:          "test",
+		Kind:           "http",
+		Payload:        map[string]any{"url": "https://example.internal/task"},
+		ScheduleType:   "once",
+		ConcurrencyKey: "account-9",
+	})
+	if err != nil {
+		t.Fatalf("create queued job: %v", err)
+	}
+
+	assignments, summary, err := store.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim pending runs: %v", err)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("expected no new assignments while matching concurrency key is running, got %+v", assignments)
+	}
+	if summary.SkippedConcurrencyLimit != 1 {
+		t.Fatalf("expected one concurrency skip, got %+v", summary)
 	}
 }
 
@@ -983,6 +1525,15 @@ func createRunningRunForWorker(t *testing.T, store *Store, ctx context.Context, 
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+func containsEvent(events []RunEvent, eventType string) bool {
+	for _, event := range events {
+		if event.EventType == eventType {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMain(m *testing.M) {

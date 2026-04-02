@@ -84,13 +84,19 @@ func (s *Server) routes() {
 	s.handle("GET /healthz", s.handleHealth)
 	s.handle("GET /readyz", s.handleReady)
 	s.mux.Handle("/metrics", s.metrics.Handler())
+	s.handle("GET /v1/auth/me", s.handleAuthMe)
 	s.handle("GET /v1/jobs", s.handleListJobs)
+	s.handle("POST /v1/jobs/{jobID}/pause", s.handlePauseJob)
+	s.handle("POST /v1/jobs/{jobID}/resume", s.handleResumeJob)
+	s.handle("POST /v1/jobs/{jobID}/trigger", s.handleTriggerJob)
 	s.handle("POST /v1/jobs/{jobID}/cancel", s.handleCancelJob)
 	s.handle("GET /v1/tenants/quotas", s.handleListTenantQuotas)
 	s.handle("PUT /v1/tenants/{tenantID}/quota", s.handleUpsertTenantQuota)
 	s.handle("GET /v1/audit/events", s.handleListAuditEvents)
 	s.handle("GET /v1/runs", s.handleListRuns)
 	s.handle("GET /v1/runs/{runID}", s.handleGetRun)
+	s.handle("POST /v1/runs/{runID}/requeue", s.handleRequeueRun)
+	s.handle("POST /v1/runs/{runID}/redrive", s.handleRedriveRun)
 	s.handle("POST /v1/jobs", s.handleCreateJob)
 	s.handle("GET /v1/workers", s.handleListWorkers)
 	s.handle("POST /v1/workers/register", s.handleRegisterWorker)
@@ -181,6 +187,23 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+
+	resp := AuthMeResponse{Role: string(principal.Role)}
+	if principal.TenantID != "" {
+		resp.TenantID = &principal.TenantID
+	}
+	if principal.WorkerName != "" {
+		resp.WorkerName = &principal.WorkerName
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
 	if !ok {
@@ -198,6 +221,11 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "disabled must be true or false")
 		return
 	}
+	paused, err := parseOptionalBool(r.URL.Query().Get("paused"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "paused must be true or false")
+		return
+	}
 
 	filterTenantID, allowed := authorizedTenantFilter(principal, r.URL.Query().Get("tenant_id"))
 	if !allowed {
@@ -210,6 +238,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		Queue:    r.URL.Query().Get("queue"),
 		Kind:     r.URL.Query().Get("kind"),
 		Disabled: disabled,
+		Paused:   paused,
 	})
 	if err != nil {
 		s.logger.Printf("list jobs failed: %v", err)
@@ -311,6 +340,132 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		Status:       "cancel_requested",
 		CanceledRuns: result.CanceledRuns,
 	})
+}
+
+func (s *Server) handlePauseJob(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot pause jobs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	job, err := s.store.GetJob(ctx, r.PathValue("jobID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		s.logger.Printf("load job for pause failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load job")
+		return
+	}
+	if !canAccessTenant(principal, job.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	result, err := s.store.PauseJob(ctx, job.ID, s.auditInput(principal, "JOB_PAUSE", "job", job.ID, job.TenantID, nil))
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "JOB_PAUSE_CONFLICT", "job cannot be paused in its current state")
+			return
+		}
+		s.logger.Printf("pause job failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to pause job")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, JobLifecycleResponse{JobID: result.JobID, Status: result.Status})
+}
+
+func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot resume jobs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	job, err := s.store.GetJob(ctx, r.PathValue("jobID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		s.logger.Printf("load job for resume failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load job")
+		return
+	}
+	if !canAccessTenant(principal, job.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	result, err := s.store.ResumeJob(ctx, job.ID, s.auditInput(principal, "JOB_RESUME", "job", job.ID, job.TenantID, nil))
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "JOB_RESUME_CONFLICT", "job cannot be resumed in its current state")
+			return
+		}
+		s.logger.Printf("resume job failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to resume job")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, JobLifecycleResponse{JobID: result.JobID, Status: result.Status})
+}
+
+func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot trigger jobs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	job, err := s.store.GetJob(ctx, r.PathValue("jobID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		s.logger.Printf("load job for trigger failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load job")
+		return
+	}
+	if !canAccessTenant(principal, job.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	runID, err := s.store.TriggerJob(ctx, job.ID, s.auditInput(principal, "JOB_TRIGGER", "job", job.ID, job.TenantID, nil))
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+		case errors.Is(err, store.ErrConflict):
+			writeError(w, http.StatusConflict, "JOB_TRIGGER_CONFLICT", "job cannot be triggered in its current state")
+		default:
+			s.logger.Printf("trigger job failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to trigger job")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, TriggerJobResponse{JobID: job.ID, RunID: runID, Status: "accepted"})
 }
 
 func (s *Server) handleListTenantQuotas(w http.ResponseWriter, r *http.Request) {
@@ -439,13 +594,19 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
 		return
 	}
+	deadLettered, err := parseOptionalBool(r.URL.Query().Get("dead_lettered"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "dead_lettered must be true or false")
+		return
+	}
 
 	runs, err := s.store.ListRuns(ctx, store.RunFilter{
-		TenantID: filterTenantID,
-		Status:   r.URL.Query().Get("status"),
-		Queue:    r.URL.Query().Get("queue"),
-		WorkerID: r.URL.Query().Get("worker_id"),
-		JobID:    r.URL.Query().Get("job_id"),
+		TenantID:     filterTenantID,
+		Statuses:     strings.Split(r.URL.Query().Get("status"), ","),
+		Queue:        r.URL.Query().Get("queue"),
+		WorkerID:     r.URL.Query().Get("worker_id"),
+		JobID:        r.URL.Query().Get("job_id"),
+		DeadLettered: deadLettered,
 	})
 	if err != nil {
 		s.logger.Printf("list runs failed: %v", err)
@@ -492,6 +653,116 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, GetRunResponse{
 		Run:    run,
 		Events: events,
+	})
+}
+
+func (s *Server) handleRequeueRun(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot requeue runs")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	run, _, err := s.store.GetRun(ctx, r.PathValue("runID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+			return
+		}
+		s.logger.Printf("load run for requeue failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load run")
+		return
+	}
+	if !canAccessTenant(principal, run.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	newRunID, err := s.store.RequeueRun(ctx, run.ID, s.auditInput(principal, "RUN_REQUEUE", "run", run.ID, run.TenantID, map[string]any{
+		"job_id": run.JobID,
+	}))
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+		case errors.Is(err, store.ErrConflict):
+			writeError(w, http.StatusConflict, "RUN_REQUEUE_CONFLICT", "run cannot be requeued in its current state")
+		default:
+			s.logger.Printf("requeue run failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to requeue run")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, RequeueRunResponse{
+		RunID:   newRunID,
+		Status:  "accepted",
+		JobID:   run.JobID,
+		Source:  "manual_requeue",
+		FromRun: run.ID,
+	})
+}
+
+func (s *Server) handleRedriveRun(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot redrive runs")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	run, _, err := s.store.GetRun(ctx, r.PathValue("runID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+			return
+		}
+		s.logger.Printf("load run for redrive failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load run")
+		return
+	}
+	if !canAccessTenant(principal, run.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+	if run.DeadLetteredAt == nil {
+		writeError(w, http.StatusConflict, "RUN_REDRIVE_CONFLICT", "run is not in the dead-letter queue")
+		return
+	}
+
+	newRunID, err := s.store.RequeueRun(ctx, run.ID, s.auditInput(principal, "RUN_REDRIVE", "run", run.ID, run.TenantID, map[string]any{
+		"job_id": run.JobID,
+	}))
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+		case errors.Is(err, store.ErrConflict):
+			writeError(w, http.StatusConflict, "RUN_REDRIVE_CONFLICT", "run cannot be redriven in its current state")
+		default:
+			s.logger.Printf("redrive run failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to redrive run")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, RequeueRunResponse{
+		RunID:   newRunID,
+		Status:  "accepted",
+		JobID:   run.JobID,
+		Source:  "dead_letter_redrive",
+		FromRun: run.ID,
 	})
 }
 
@@ -557,7 +828,7 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, RegisterWorkerResponse{
 		WorkerID:                  resp.WorkerID,
 		HeartbeatIntervalSeconds:  int(s.cfg.WorkerHeartbeatInterval / time.Second),
-		LeaseRenewIntervalSeconds: int(s.cfg.WorkerHeartbeatInterval / time.Second),
+		LeaseRenewIntervalSeconds: int(s.cfg.WorkerLeaseDuration / time.Second),
 	})
 }
 

@@ -34,6 +34,7 @@ type CreateJobInput struct {
 	ScheduleType            string
 	CronExpr                string
 	Timezone                string
+	ConcurrencyKey          string
 	Priority                int
 	MaxRetries              int
 	TimeoutSeconds          int
@@ -47,16 +48,18 @@ type CreateJobResult struct {
 }
 
 type Job struct {
-	ID           string     `json:"id"`
-	Name         string     `json:"name"`
-	TenantID     string     `json:"tenant_id"`
-	Queue        string     `json:"queue"`
-	Kind         string     `json:"kind"`
-	ScheduleType string     `json:"schedule_type"`
-	CronExpr     *string    `json:"cron_expr,omitempty"`
-	Timezone     *string    `json:"timezone,omitempty"`
-	DisabledAt   *time.Time `json:"disabled_at,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	TenantID       string     `json:"tenant_id"`
+	Queue          string     `json:"queue"`
+	Kind           string     `json:"kind"`
+	ScheduleType   string     `json:"schedule_type"`
+	CronExpr       *string    `json:"cron_expr,omitempty"`
+	Timezone       *string    `json:"timezone,omitempty"`
+	ConcurrencyKey *string    `json:"concurrency_key,omitempty"`
+	PausedAt       *time.Time `json:"paused_at,omitempty"`
+	DisabledAt     *time.Time `json:"disabled_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 type JobFilter struct {
@@ -64,6 +67,7 @@ type JobFilter struct {
 	Queue    string
 	Kind     string
 	Disabled *bool
+	Paused   *bool
 }
 
 type RegisterWorkerInput struct {
@@ -104,6 +108,7 @@ type ClaimSummary struct {
 	SaturatedWorkers        int
 	SkippedNoEligibleWorker int
 	SkippedNoCapacity       int
+	SkippedConcurrencyLimit int
 	SkippedTenantLimit      int
 	TenantCandidates        map[string]int
 	TenantAssigned          map[string]int
@@ -160,12 +165,13 @@ type eligibleWorker struct {
 }
 
 type candidateRun struct {
-	RunID       string
-	JobID       string
-	TenantID    string
-	Queue       string
-	Kind        string
-	ScheduledAt time.Time
+	RunID          string
+	JobID          string
+	TenantID       string
+	Queue          string
+	Kind           string
+	ConcurrencyKey string
+	ScheduledAt    time.Time
 }
 
 type PolledAssignment struct {
@@ -208,22 +214,29 @@ type RecoveredRun struct {
 }
 
 type Run struct {
-	ID              string         `json:"id"`
-	JobID           string         `json:"job_id"`
-	TenantID        string         `json:"tenant_id"`
-	Status          string         `json:"status"`
-	Attempt         int            `json:"attempt"`
-	ScheduledAt     time.Time      `json:"scheduled_at"`
-	AvailableAt     time.Time      `json:"available_at"`
-	StartedAt       *time.Time     `json:"started_at,omitempty"`
-	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
-	WorkerID        *string        `json:"worker_id,omitempty"`
-	LeaseToken      int64          `json:"lease_token"`
-	LeaseExpiresAt  *time.Time     `json:"lease_expires_at,omitempty"`
-	LastHeartbeatAt *time.Time     `json:"last_heartbeat_at,omitempty"`
-	Result          map[string]any `json:"result,omitempty"`
-	ErrorCode       *string        `json:"error_code,omitempty"`
-	ErrorMessage    *string        `json:"error_message,omitempty"`
+	ID               string         `json:"id"`
+	JobID            string         `json:"job_id"`
+	JobName          string         `json:"job_name,omitempty"`
+	TenantID         string         `json:"tenant_id"`
+	Queue            string         `json:"queue,omitempty"`
+	Kind             string         `json:"kind,omitempty"`
+	ScheduleType     string         `json:"schedule_type,omitempty"`
+	JobDisabled      bool           `json:"job_disabled"`
+	Status           string         `json:"status"`
+	Attempt          int            `json:"attempt"`
+	ScheduledAt      time.Time      `json:"scheduled_at"`
+	AvailableAt      time.Time      `json:"available_at"`
+	StartedAt        *time.Time     `json:"started_at,omitempty"`
+	CompletedAt      *time.Time     `json:"completed_at,omitempty"`
+	WorkerID         *string        `json:"worker_id,omitempty"`
+	LeaseToken       int64          `json:"lease_token"`
+	LeaseExpiresAt   *time.Time     `json:"lease_expires_at,omitempty"`
+	LastHeartbeatAt  *time.Time     `json:"last_heartbeat_at,omitempty"`
+	DeadLetteredAt   *time.Time     `json:"dead_lettered_at,omitempty"`
+	DeadLetterReason *string        `json:"dead_letter_reason,omitempty"`
+	Result           map[string]any `json:"result,omitempty"`
+	ErrorCode        *string        `json:"error_code,omitempty"`
+	ErrorMessage     *string        `json:"error_message,omitempty"`
 }
 
 type RunEvent struct {
@@ -235,17 +248,24 @@ type RunEvent struct {
 }
 
 type RunFilter struct {
-	TenantID string
-	Status   string
-	Queue    string
-	WorkerID string
-	JobID    string
+	TenantID     string
+	Status       string
+	Statuses     []string
+	Queue        string
+	WorkerID     string
+	JobID        string
+	DeadLettered *bool
 }
 
 type CancelJobResult struct {
 	JobID        string
 	CanceledRuns int64
 	Disabled     bool
+}
+
+type JobLifecycleResult struct {
+	JobID  string
+	Status string
 }
 
 func Open(databaseURL string) (*Store, error) {
@@ -325,10 +345,10 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO jobs (
 			id, name, tenant_id, queue, kind, payload, schedule_type, priority,
-			max_retries, timeout_seconds, retry_backoff_base_seconds, dedupe_key,
+			max_retries, timeout_seconds, retry_backoff_base_seconds, dedupe_key, concurrency_key,
 			created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $13)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, NULLIF($12, ''), NULLIF($13, ''), $14, $14)
 	`,
 		jobID,
 		input.Name,
@@ -342,6 +362,7 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 		input.TimeoutSeconds,
 		input.RetryBackoffBaseSeconds,
 		input.DedupeKey,
+		input.ConcurrencyKey,
 		now,
 	)
 	if err != nil {
@@ -408,7 +429,7 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 
 func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 	query := `
-		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, js.cron_expr, js.timezone, j.disabled_at, j.created_at
+		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, js.cron_expr, js.timezone, j.concurrency_key, j.paused_at, j.disabled_at, j.created_at
 		FROM jobs j
 		LEFT JOIN job_schedules js ON js.job_id = j.id
 		WHERE 1=1
@@ -433,6 +454,13 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 			query += " AND j.disabled_at IS NULL"
 		}
 	}
+	if filter.Paused != nil {
+		if *filter.Paused {
+			query += " AND j.paused_at IS NOT NULL"
+		} else {
+			query += " AND j.paused_at IS NULL"
+		}
+	}
 	query += " ORDER BY j.created_at DESC LIMIT 100"
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -446,8 +474,10 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 		var job Job
 		var cronExpr sql.NullString
 		var timezone sql.NullString
+		var concurrencyKey sql.NullString
+		var pausedAt sql.NullTime
 		var disabledAt sql.NullTime
-		if err := rows.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &job.ScheduleType, &cronExpr, &timezone, &disabledAt, &job.CreatedAt); err != nil {
+		if err := rows.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &job.ScheduleType, &cronExpr, &timezone, &concurrencyKey, &pausedAt, &disabledAt, &job.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan job: %w", err)
 		}
 		if cronExpr.Valid {
@@ -457,6 +487,14 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 		if timezone.Valid {
 			value := timezone.String
 			job.Timezone = &value
+		}
+		if concurrencyKey.Valid {
+			value := concurrencyKey.String
+			job.ConcurrencyKey = &value
+		}
+		if pausedAt.Valid {
+			value := pausedAt.Time
+			job.PausedAt = &value
 		}
 		if disabledAt.Valid {
 			value := disabledAt.Time
@@ -474,7 +512,7 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 
 func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, js.cron_expr, js.timezone, j.disabled_at, j.created_at
+		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, js.cron_expr, js.timezone, j.concurrency_key, j.paused_at, j.disabled_at, j.created_at
 		FROM jobs j
 		LEFT JOIN job_schedules js ON js.job_id = j.id
 		WHERE j.id = $1
@@ -483,8 +521,10 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 	var job Job
 	var cronExpr sql.NullString
 	var timezone sql.NullString
+	var concurrencyKey sql.NullString
+	var pausedAt sql.NullTime
 	var disabledAt sql.NullTime
-	if err := row.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &job.ScheduleType, &cronExpr, &timezone, &disabledAt, &job.CreatedAt); err != nil {
+	if err := row.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &job.ScheduleType, &cronExpr, &timezone, &concurrencyKey, &pausedAt, &disabledAt, &job.CreatedAt); err != nil {
 		return Job{}, err
 	}
 	if cronExpr.Valid {
@@ -494,6 +534,14 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 	if timezone.Valid {
 		value := timezone.String
 		job.Timezone = &value
+	}
+	if concurrencyKey.Valid {
+		value := concurrencyKey.String
+		job.ConcurrencyKey = &value
+	}
+	if pausedAt.Valid {
+		value := pausedAt.Time
+		job.PausedAt = &value
 	}
 	if disabledAt.Valid {
 		value := disabledAt.Time
@@ -505,9 +553,10 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 
 func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
 	query := `
-		SELECT r.id, r.job_id, j.tenant_id, r.status, r.attempt, r.scheduled_at, r.available_at, r.started_at,
+		SELECT r.id, r.job_id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, j.disabled_at IS NOT NULL,
+		       r.status, r.attempt, r.scheduled_at, r.available_at, r.started_at,
 		       r.completed_at, r.worker_id, r.lease_token, r.lease_expires_at, r.last_heartbeat_at,
-		       r.result, r.error_code, r.error_message
+		       r.dead_lettered_at, r.dead_letter_reason, r.result, r.error_code, r.error_message
 		FROM runs r
 		JOIN jobs j ON j.id = r.job_id
 		WHERE 1=1
@@ -517,9 +566,20 @@ func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
 		args = append(args, filter.TenantID)
 		query += fmt.Sprintf(" AND j.tenant_id = $%d", len(args))
 	}
-	if filter.Status != "" {
-		args = append(args, filter.Status)
+	statuses := normalizeStatuses(filter.Statuses)
+	if len(statuses) == 0 && strings.TrimSpace(filter.Status) != "" {
+		statuses = []string{strings.TrimSpace(filter.Status)}
+	}
+	if len(statuses) == 1 {
+		args = append(args, statuses[0])
 		query += fmt.Sprintf(" AND r.status = $%d", len(args))
+	} else if len(statuses) > 1 {
+		placeholders := make([]string, 0, len(statuses))
+		for _, status := range statuses {
+			args = append(args, status)
+			placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+		}
+		query += " AND r.status IN (" + strings.Join(placeholders, ", ") + ")"
 	}
 	if filter.Queue != "" {
 		args = append(args, filter.Queue)
@@ -532,6 +592,13 @@ func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
 	if filter.JobID != "" {
 		args = append(args, filter.JobID)
 		query += fmt.Sprintf(" AND r.job_id = $%d", len(args))
+	}
+	if filter.DeadLettered != nil {
+		if *filter.DeadLettered {
+			query += " AND r.dead_lettered_at IS NOT NULL"
+		} else {
+			query += " AND r.dead_lettered_at IS NULL"
+		}
 	}
 	query += " ORDER BY r.created_at DESC LIMIT 100"
 
@@ -558,9 +625,10 @@ func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
 
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, []RunEvent, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT r.id, r.job_id, j.tenant_id, r.status, r.attempt, r.scheduled_at, r.available_at, r.started_at,
+		SELECT r.id, r.job_id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, j.disabled_at IS NOT NULL,
+		       r.status, r.attempt, r.scheduled_at, r.available_at, r.started_at,
 		       completed_at, worker_id, lease_token, lease_expires_at, last_heartbeat_at,
-		       result, error_code, error_message
+		       dead_lettered_at, dead_letter_reason, result, error_code, error_message
 		FROM runs r
 		JOIN jobs j ON j.id = r.job_id
 		WHERE r.id = $1
@@ -607,6 +675,240 @@ func (s *Store) GetRun(ctx context.Context, runID string) (Run, []RunEvent, erro
 	}
 
 	return run, events, nil
+}
+
+func (s *Store) PauseJob(ctx context.Context, jobID string, audit *AuditEventInput) (JobLifecycleResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("begin pause job tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET paused_at = COALESCE(paused_at, $2),
+		    updated_at = $2
+		WHERE id = $1
+		  AND disabled_at IS NULL
+	`, jobID, now)
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("pause job: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("pause job rows affected: %w", err)
+	}
+	if affected == 0 {
+		return JobLifecycleResult{}, ErrConflict
+	}
+
+	if err := insertAuditEvent(ctx, tx, now, audit); err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("insert pause audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("commit pause job tx: %w", err)
+	}
+	return JobLifecycleResult{JobID: jobID, Status: "paused"}, nil
+}
+
+func (s *Store) ResumeJob(ctx context.Context, jobID string, audit *AuditEventInput) (JobLifecycleResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("begin resume job tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET paused_at = NULL,
+		    updated_at = $2
+		WHERE id = $1
+		  AND disabled_at IS NULL
+		  AND paused_at IS NOT NULL
+	`, jobID, now)
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("resume job: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("resume job rows affected: %w", err)
+	}
+	if affected == 0 {
+		return JobLifecycleResult{}, ErrConflict
+	}
+
+	if err := insertAuditEvent(ctx, tx, now, audit); err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("insert resume audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("commit resume job tx: %w", err)
+	}
+	return JobLifecycleResult{JobID: jobID, Status: "active"}, nil
+}
+
+func (s *Store) TriggerJob(ctx context.Context, jobID string, audit *AuditEventInput) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin trigger job tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var scheduleType string
+	var disabled bool
+	var paused bool
+	var tenantID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT schedule_type, disabled_at IS NOT NULL, paused_at IS NOT NULL, tenant_id
+		FROM jobs
+		WHERE id = $1
+		FOR UPDATE
+	`, jobID).Scan(&scheduleType, &disabled, &paused, &tenantID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", sql.ErrNoRows
+		}
+		return "", fmt.Errorf("load job for trigger: %w", err)
+	}
+	if scheduleType != "cron" || disabled || paused {
+		return "", ErrConflict
+	}
+
+	runID, err := newID("run")
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO runs (
+			id, job_id, status, attempt, scheduled_at, available_at, created_at, updated_at
+		)
+		VALUES ($1, $2, 'PENDING', 0, NOW(), NOW(), NOW(), NOW())
+	`, runID, jobID); err != nil {
+		return "", fmt.Errorf("insert triggered run: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO run_events (run_id, event_type, actor_type, payload)
+		VALUES ($1, 'RUN_CREATED', 'api', '{"source":"manual_trigger"}'::jsonb)
+	`, runID); err != nil {
+		return "", fmt.Errorf("insert trigger event: %w", err)
+	}
+	if audit != nil {
+		if audit.Payload == nil {
+			audit.Payload = map[string]any{}
+		}
+		audit.Payload["run_id"] = runID
+		audit.TenantID = tenantID
+	}
+	if err := insertAuditEvent(ctx, tx, time.Now().UTC(), audit); err != nil {
+		return "", fmt.Errorf("insert trigger audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit trigger job tx: %w", err)
+	}
+	return runID, nil
+}
+
+func (s *Store) RequeueRun(ctx context.Context, runID string, audit *AuditEventInput) (string, error) {
+	ctx, span := observability.Tracer("runq/store").Start(ctx, "store.requeue_run")
+	defer span.End()
+	span.SetAttributes(attribute.String("runq.run_id", runID))
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin requeue tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	type requeueSource struct {
+		jobID        string
+		tenantID     string
+		status       string
+		scheduleType string
+		jobDisabled  bool
+	}
+	var source requeueSource
+	err = tx.QueryRowContext(ctx, `
+		SELECT r.job_id, j.tenant_id, r.status, j.schedule_type, j.disabled_at IS NOT NULL
+		FROM runs r
+		JOIN jobs j ON j.id = r.job_id
+		WHERE r.id = $1
+		FOR UPDATE OF r, j
+	`, runID).Scan(&source.jobID, &source.tenantID, &source.status, &source.scheduleType, &source.jobDisabled)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", sql.ErrNoRows
+		}
+		return "", fmt.Errorf("load run for requeue: %w", err)
+	}
+
+	if source.jobDisabled && source.scheduleType != "once" {
+		return "", ErrConflict
+	}
+	switch source.status {
+	case "FAILED", "TIMED_OUT", "CANCELED":
+	default:
+		return "", ErrConflict
+	}
+
+	newRunID, err := newID("run")
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO runs (
+			id, job_id, status, attempt, scheduled_at, available_at, created_at, updated_at
+		)
+		VALUES ($1, $2, 'PENDING', 0, NOW(), NOW(), NOW(), NOW())
+	`, newRunID, source.jobID); err != nil {
+		return "", fmt.Errorf("insert requeued run: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO run_events (run_id, event_type, actor_type, payload)
+		VALUES ($1, 'RUN_REQUEUED', 'api', $2::jsonb)
+	`, runID, fmt.Sprintf(`{"new_run_id":%q,"reason":"manual_requeue"}`, newRunID)); err != nil {
+		return "", fmt.Errorf("insert source requeue event: %w", err)
+	}
+
+	sourcePayload := map[string]any{
+		"source":        "manual_requeue",
+		"source_run_id": runID,
+	}
+	if source.scheduleType == "cron" {
+		sourcePayload["ad_hoc"] = true
+	}
+	sourcePayloadJSON, err := json.Marshal(sourcePayload)
+	if err != nil {
+		return "", fmt.Errorf("marshal requeue payload: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO run_events (run_id, event_type, actor_type, payload)
+		VALUES ($1, 'RUN_CREATED', 'api', $2::jsonb)
+	`, newRunID, string(sourcePayloadJSON)); err != nil {
+		return "", fmt.Errorf("insert new run event: %w", err)
+	}
+
+	if audit != nil {
+		payload := audit.Payload
+		if payload == nil {
+			payload = map[string]any{}
+		}
+		payload["source_run_id"] = runID
+		payload["new_run_id"] = newRunID
+		payload["job_id"] = source.jobID
+		audit.Payload = payload
+		audit.TenantID = source.tenantID
+	}
+	if err := insertAuditEvent(ctx, tx, time.Now().UTC(), audit); err != nil {
+		return "", fmt.Errorf("insert requeue audit event: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit requeue tx: %w", err)
+	}
+
+	return newRunID, nil
 }
 
 func (s *Store) CancelJob(ctx context.Context, jobID string, reason string, audit *AuditEventInput) (CancelJobResult, error) {
@@ -955,11 +1257,12 @@ func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDurati
 	}
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT r.id, r.job_id, j.tenant_id, j.queue, j.kind, r.scheduled_at
+		SELECT r.id, r.job_id, j.tenant_id, j.queue, j.kind, COALESCE(j.concurrency_key, ''), r.scheduled_at
 		FROM runs r
 		JOIN jobs j ON j.id = r.job_id
 		WHERE r.status = 'PENDING'
 		  AND r.available_at <= NOW()
+		  AND j.paused_at IS NULL
 		ORDER BY j.priority ASC, r.scheduled_at ASC
 		FOR UPDATE OF r SKIP LOCKED
 		LIMIT $1
@@ -971,7 +1274,7 @@ func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDurati
 	candidates := make([]candidateRun, 0, batchSize)
 	for rows.Next() {
 		var item candidateRun
-		if err := rows.Scan(&item.RunID, &item.JobID, &item.TenantID, &item.Queue, &item.Kind, &item.ScheduledAt); err != nil {
+		if err := rows.Scan(&item.RunID, &item.JobID, &item.TenantID, &item.Queue, &item.Kind, &item.ConcurrencyKey, &item.ScheduledAt); err != nil {
 			rows.Close()
 			return nil, ClaimSummary{}, fmt.Errorf("scan candidate run: %w", err)
 		}
@@ -1068,6 +1371,35 @@ func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDurati
 		return nil, ClaimSummary{}, fmt.Errorf("tenant inflight rows error: %w", err)
 	}
 
+	concurrencyRows, err := tx.QueryContext(ctx, `
+		SELECT j.tenant_id, j.concurrency_key, COUNT(r.id)
+		FROM runs r
+		JOIN jobs j ON j.id = r.job_id
+		WHERE r.status = 'RUNNING'
+		  AND r.lease_expires_at > NOW()
+		  AND j.concurrency_key IS NOT NULL
+		  AND j.concurrency_key <> ''
+		GROUP BY j.tenant_id, j.concurrency_key
+	`)
+	if err != nil {
+		return nil, ClaimSummary{}, fmt.Errorf("select concurrency inflight: %w", err)
+	}
+	defer concurrencyRows.Close()
+
+	concurrencyInflight := make(map[string]int)
+	for concurrencyRows.Next() {
+		var tenantID string
+		var concurrencyKey string
+		var count int
+		if err := concurrencyRows.Scan(&tenantID, &concurrencyKey, &count); err != nil {
+			return nil, ClaimSummary{}, fmt.Errorf("scan concurrency inflight: %w", err)
+		}
+		concurrencyInflight[concurrencyScopeKey(tenantID, concurrencyKey)] = count
+	}
+	if err := concurrencyRows.Err(); err != nil {
+		return nil, ClaimSummary{}, fmt.Errorf("concurrency inflight rows error: %w", err)
+	}
+
 	quotaRows, err := tx.QueryContext(ctx, `
 		SELECT tenant_id, max_inflight
 		FROM tenant_quotas
@@ -1096,6 +1428,15 @@ func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDurati
 	for _, candidate := range candidates {
 		if len(assignments) >= batchSize {
 			break
+		}
+		if candidate.ConcurrencyKey != "" {
+			scopeKey := concurrencyScopeKey(candidate.TenantID, candidate.ConcurrencyKey)
+			if concurrencyInflight[scopeKey] > 0 {
+				summary.SkippedConcurrencyLimit++
+				summary.TenantSkipped[candidate.TenantID]++
+				summary.QueueSkipped[candidate.Queue]++
+				continue
+			}
 		}
 		effectiveQuota := resolveTenantQuota(candidate.TenantID, tenantQuotas, tenantMaxInflight)
 		if effectiveQuota > 0 {
@@ -1148,6 +1489,9 @@ func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDurati
 		worker.Assigned++
 		tenantInflight[candidate.TenantID]++
 		summary.TenantInflight[candidate.TenantID] = tenantInflight[candidate.TenantID]
+		if candidate.ConcurrencyKey != "" {
+			concurrencyInflight[concurrencyScopeKey(candidate.TenantID, candidate.ConcurrencyKey)]++
+		}
 		summary.TenantAssigned[candidate.TenantID]++
 		summary.QueueAssigned[candidate.Queue]++
 	}
@@ -1242,6 +1586,7 @@ func (s *Store) MaterializeDueRuns(ctx context.Context, batchSize int) (int, err
 		FROM job_schedules js
 		JOIN jobs j ON j.id = js.job_id
 		WHERE j.disabled_at IS NULL
+		  AND j.paused_at IS NULL
 		  AND js.next_run_at <= NOW()
 		ORDER BY js.next_run_at ASC
 		FOR UPDATE OF js SKIP LOCKED
@@ -1557,6 +1902,8 @@ func (s *Store) FailRun(ctx context.Context, input FailRunInput) error {
 			    completed_at = $5,
 			    error_code = $4,
 			    error_message = $6,
+			    dead_lettered_at = $5,
+			    dead_letter_reason = 'worker_failed',
 			    updated_at = $5
 			WHERE id = $1
 			  AND worker_id = $2
@@ -1681,6 +2028,8 @@ func (s *Store) RecoverExpiredRuns(ctx context.Context, batchSize int) ([]Recove
 			    completed_at = $2,
 			    error_code = 'LEASE_EXPIRED',
 			    error_message = 'lease expired and retry budget exhausted',
+			    dead_lettered_at = $2,
+			    dead_letter_reason = 'lease_expired',
 			    updated_at = $2
 			WHERE id = $1
 		`, item.runID, now); err != nil {
@@ -1800,6 +2149,8 @@ func (s *Store) RecoverTimedOutRuns(ctx context.Context, batchSize int) ([]Recov
 			    completed_at = $2,
 			    error_code = 'TIMED_OUT',
 			    error_message = 'run timed out and retry budget exhausted',
+			    dead_lettered_at = $2,
+			    dead_letter_reason = 'timed_out',
 			    updated_at = $2
 			WHERE id = $1
 		`, item.runID, now); err != nil {
@@ -1894,6 +2245,29 @@ func parsePQArray(value string) []string {
 		}
 	}
 	return items
+}
+
+func normalizeStatuses(values []string) []string {
+	seen := make(map[string]struct{})
+	statuses := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if _, ok := seen[part]; ok {
+				continue
+			}
+			seen[part] = struct{}{}
+			statuses = append(statuses, part)
+		}
+	}
+	return statuses
+}
+
+func concurrencyScopeKey(tenantID, concurrencyKey string) string {
+	return defaultTenantID(tenantID) + "\x00" + strings.TrimSpace(concurrencyKey)
 }
 
 func containsString(items []string, target string) bool {
@@ -2068,11 +2442,14 @@ type runScanner interface {
 
 func scanRun(scanner runScanner) (Run, error) {
 	var run Run
+	var jobDisabled bool
 	var startedAt sql.NullTime
 	var completedAt sql.NullTime
 	var workerID sql.NullString
 	var leaseExpiresAt sql.NullTime
 	var lastHeartbeatAt sql.NullTime
+	var deadLetteredAt sql.NullTime
+	var deadLetterReason sql.NullString
 	var resultBytes []byte
 	var errorCode sql.NullString
 	var errorMessage sql.NullString
@@ -2080,7 +2457,12 @@ func scanRun(scanner runScanner) (Run, error) {
 	if err := scanner.Scan(
 		&run.ID,
 		&run.JobID,
+		&run.JobName,
 		&run.TenantID,
+		&run.Queue,
+		&run.Kind,
+		&run.ScheduleType,
+		&jobDisabled,
 		&run.Status,
 		&run.Attempt,
 		&run.ScheduledAt,
@@ -2091,12 +2473,15 @@ func scanRun(scanner runScanner) (Run, error) {
 		&run.LeaseToken,
 		&leaseExpiresAt,
 		&lastHeartbeatAt,
+		&deadLetteredAt,
+		&deadLetterReason,
 		&resultBytes,
 		&errorCode,
 		&errorMessage,
 	); err != nil {
 		return Run{}, err
 	}
+	run.JobDisabled = jobDisabled
 
 	if startedAt.Valid {
 		value := startedAt.Time
@@ -2117,6 +2502,14 @@ func scanRun(scanner runScanner) (Run, error) {
 	if lastHeartbeatAt.Valid {
 		value := lastHeartbeatAt.Time
 		run.LastHeartbeatAt = &value
+	}
+	if deadLetteredAt.Valid {
+		value := deadLetteredAt.Time
+		run.DeadLetteredAt = &value
+	}
+	if deadLetterReason.Valid {
+		value := deadLetterReason.String
+		run.DeadLetterReason = &value
 	}
 	if len(resultBytes) > 0 {
 		if err := json.Unmarshal(resultBytes, &run.Result); err != nil {

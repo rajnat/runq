@@ -76,9 +76,11 @@ func (s *Scheduler) tick(ctx context.Context) error {
 	s.metrics.SetGauge("runq_scheduler_saturated_workers", int64(summary.SaturatedWorkers))
 	s.metrics.SetGaugeVec("runq_scheduler_skipped_runs_last_tick", map[string]string{"reason": "no_capacity"}, float64(summary.SkippedNoCapacity))
 	s.metrics.SetGaugeVec("runq_scheduler_skipped_runs_last_tick", map[string]string{"reason": "no_worker"}, float64(summary.SkippedNoEligibleWorker))
+	s.metrics.SetGaugeVec("runq_scheduler_skipped_runs_last_tick", map[string]string{"reason": "concurrency_limit"}, float64(summary.SkippedConcurrencyLimit))
 	s.metrics.SetGaugeVec("runq_scheduler_skipped_runs_last_tick", map[string]string{"reason": "tenant_limit"}, float64(summary.SkippedTenantLimit))
 	s.metrics.AddCounterVec("runq_scheduler_skipped_runs_total", map[string]string{"reason": "no_capacity"}, float64(summary.SkippedNoCapacity))
 	s.metrics.AddCounterVec("runq_scheduler_skipped_runs_total", map[string]string{"reason": "no_worker"}, float64(summary.SkippedNoEligibleWorker))
+	s.metrics.AddCounterVec("runq_scheduler_skipped_runs_total", map[string]string{"reason": "concurrency_limit"}, float64(summary.SkippedConcurrencyLimit))
 	s.metrics.AddCounterVec("runq_scheduler_skipped_runs_total", map[string]string{"reason": "tenant_limit"}, float64(summary.SkippedTenantLimit))
 	s.metrics.SetGaugeVec("runq_scheduler_tenant_groups_last_tick", map[string]string{"state": "candidate"}, float64(len(summary.TenantCandidates)))
 	s.metrics.SetGaugeVec("runq_scheduler_tenant_groups_last_tick", map[string]string{"state": "assigned"}, float64(len(summary.TenantAssigned)))
@@ -92,11 +94,12 @@ func (s *Scheduler) tick(ctx context.Context) error {
 	if len(assignments) == 0 {
 		s.metrics.IncCounter("runq_scheduler_ticks_empty_total")
 		s.logger.Printf(
-			"scheduler tick: no pending runs claimed candidates=%d eligible_workers=%d skipped_no_worker=%d skipped_no_capacity=%d skipped_tenant_limit=%d",
+			"scheduler tick: no pending runs claimed candidates=%d eligible_workers=%d skipped_no_worker=%d skipped_no_capacity=%d skipped_concurrency_limit=%d skipped_tenant_limit=%d",
 			summary.CandidateRuns,
 			summary.EligibleWorkers,
 			summary.SkippedNoEligibleWorker,
 			summary.SkippedNoCapacity,
+			summary.SkippedConcurrencyLimit,
 			summary.SkippedTenantLimit,
 		)
 		span.SetAttributes(

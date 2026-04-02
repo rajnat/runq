@@ -14,9 +14,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     timeout_seconds INTEGER NOT NULL DEFAULT 300,
     retry_backoff_base_seconds INTEGER NOT NULL DEFAULT 5,
     dedupe_key TEXT,
+    concurrency_key TEXT,
     created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    paused_at TIMESTAMPTZ,
     disabled_at TIMESTAMPTZ
 );
 
@@ -74,6 +76,8 @@ CREATE TABLE IF NOT EXISTS runs (
     lease_token BIGINT NOT NULL DEFAULT 0,
     lease_expires_at TIMESTAMPTZ,
     last_heartbeat_at TIMESTAMPTZ,
+    dead_lettered_at TIMESTAMPTZ,
+    dead_letter_reason TEXT,
     result JSONB,
     error_code TEXT,
     error_message TEXT,
@@ -94,6 +98,7 @@ CREATE TABLE IF NOT EXISTS run_events (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_queue_priority ON jobs(queue, priority);
 CREATE INDEX IF NOT EXISTS idx_jobs_tenant_queue_priority ON jobs(tenant_id, queue, priority);
+CREATE INDEX IF NOT EXISTS idx_jobs_tenant_concurrency_key ON jobs(tenant_id, concurrency_key) WHERE concurrency_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedupe_key ON jobs(tenant_id, dedupe_key) WHERE dedupe_key IS NOT NULL AND disabled_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_job_schedules_next_run_at ON job_schedules(next_run_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status_available_at ON runs(status, available_at);
