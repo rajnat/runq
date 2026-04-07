@@ -1,0 +1,287 @@
+:root {
+  color-scheme: light;
+  font-family: "IBM Plex Sans", "Helvetica Neue", sans-serif;
+  color: #18212c;
+  background:
+    radial-gradient(circle at top left, rgba(245, 182, 66, 0.16), transparent 28%),
+    linear-gradient(180deg, #f3f0e8 0%, #f8f7f3 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  background: #18212c;
+  color: #fff;
+  cursor: pointer;
+  padding: 0.75rem 1.1rem;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+input {
+  width: 100%;
+  border: 1px solid #d4d8df;
+  border-radius: 16px;
+  padding: 0.8rem 0.95rem;
+  margin-top: 0.35rem;
+  background: #fff;
+}
+
+a {
+  color: #0c5d66;
+  text-decoration: none;
+}
+
+pre {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.shell,
+.page,
+.signin-layout {
+  min-height: 100vh;
+}
+
+.shell {
+  padding: 2rem;
+}
+
+.signin-layout {
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+}
+
+.signin-panel,
+.panel {
+  width: min(1120px, 100%);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(24, 33, 44, 0.08);
+  border-radius: 28px;
+  box-shadow: 0 24px 80px rgba(24, 33, 44, 0.08);
+}
+
+.signin-panel {
+  max-width: 520px;
+  padding: 2rem;
+}
+
+.panel {
+  padding: 1.5rem;
+}
+
+.topbar,
+.panel-header,
+.action-row,
+.session-pill,
+.event-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.topbar {
+  margin-bottom: 1.5rem;
+}
+
+.session-pill {
+  flex-wrap: wrap;
+}
+
+.eyebrow {
+  margin: 0 0 0.35rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.supporting,
+.crumb,
+.locked-filter {
+  color: #5b6470;
+}
+
+.form-grid,
+.filters,
+.detail-grid,
+.json-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.filters {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin: 1.25rem 0;
+}
+
+.detail-grid,
+.json-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 1rem;
+}
+
+.table-wrap {
+  overflow: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.9rem 0.7rem;
+  border-bottom: 1px solid #eceef2;
+  text-align: left;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-radius: 18px;
+  padding: 0.95rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.banner.success {
+  background: #dff7e5;
+  color: #104629;
+}
+
+.banner.error {
+  background: #fde6e4;
+  color: #6d1f1a;
+}
+
+.ghost-button {
+  background: transparent;
+  color: #18212c;
+  border: 1px solid #d4d8df;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.checkbox input {
+  width: auto;
+  margin: 0;
+}
+
+.empty-state {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: #5b6470;
+}
+
+.kv,
+.json-panel,
+.events li {
+  border: 1px solid #eceef2;
+  border-radius: 22px;
+  background: #fff;
+}
+
+.kv {
+  padding: 1rem;
+}
+
+.kv span {
+  display: block;
+  color: #6b7280;
+  margin-bottom: 0.45rem;
+}
+
+.json-panel,
+.events li {
+  padding: 1rem;
+}
+
+.events ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.status-failed,
+.status-timed_out,
+.status-canceled {
+  background: #fde6e4;
+  color: #8a251e;
+}
+
+.status-pending {
+  background: #e7f1fb;
+  color: #17426c;
+}
+
+.status-succeeded {
+  background: #dff7e5;
+  color: #104629;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(24, 33, 44, 0.38);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.modal {
+  width: min(440px, 100%);
+  background: #fff;
+  border-radius: 28px;
+  padding: 1.5rem;
+}
+
+@media (max-width: 720px) {
+  .shell {
+    padding: 1rem;
+  }
+
+  .topbar,
+  .panel-header,
+  .action-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
