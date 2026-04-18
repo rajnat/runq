@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,17 @@ type CreateJobResponse struct {
 	JobID  string  `json:"job_id"`
 	RunID  *string `json:"run_id"`
 	Status string  `json:"status"`
+}
+
+type UpdateJobRequest struct {
+	Name                    *string        `json:"name,omitempty"`
+	Queue                   *string        `json:"queue,omitempty"`
+	Payload                 map[string]any `json:"payload,omitempty"`
+	Priority                *int           `json:"priority,omitempty"`
+	MaxRetries              *int           `json:"max_retries,omitempty"`
+	TimeoutSeconds          *int           `json:"timeout_seconds,omitempty"`
+	RetryBackoffBaseSeconds *int           `json:"retry_backoff_base_seconds,omitempty"`
+	ConcurrencyKey          *string        `json:"concurrency_key,omitempty"`
 }
 
 type AuthMeResponse struct {
@@ -201,6 +213,28 @@ func (r CreateJobRequest) Validate() error {
 	return nil
 }
 
+func (r UpdateJobRequest) Validate() error {
+	if r.Name != nil && strings.TrimSpace(*r.Name) == "" {
+		return errors.New("name must not be blank")
+	}
+	if r.Queue != nil && strings.TrimSpace(*r.Queue) == "" {
+		return errors.New("queue must not be blank")
+	}
+	if r.Priority != nil && *r.Priority <= 0 {
+		return errors.New("priority must be greater than zero")
+	}
+	if r.MaxRetries != nil && *r.MaxRetries < 0 {
+		return errors.New("max_retries must be zero or greater")
+	}
+	if r.TimeoutSeconds != nil && *r.TimeoutSeconds <= 0 {
+		return errors.New("timeout_seconds must be greater than zero")
+	}
+	if r.RetryBackoffBaseSeconds != nil && *r.RetryBackoffBaseSeconds <= 0 {
+		return errors.New("retry_backoff_base_seconds must be greater than zero")
+	}
+	return nil
+}
+
 func (r RegisterWorkerRequest) Validate() error {
 	if strings.TrimSpace(r.Name) == "" {
 		return errors.New("name is required")
@@ -339,4 +373,16 @@ func parseOptionalBool(value string) (*bool, error) {
 	default:
 		return nil, errors.New("must be true or false")
 	}
+}
+
+func parseOptionalInt(value string, minimum int) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < minimum {
+		return 0, errors.New("invalid integer")
+	}
+	return parsed, nil
 }

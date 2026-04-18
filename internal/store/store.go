@@ -50,18 +50,24 @@ type CreateJobResult struct {
 }
 
 type Job struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	TenantID       string     `json:"tenant_id"`
-	Queue          string     `json:"queue"`
-	Kind           string     `json:"kind"`
-	ScheduleType   string     `json:"schedule_type"`
-	CronExpr       *string    `json:"cron_expr,omitempty"`
-	Timezone       *string    `json:"timezone,omitempty"`
-	ConcurrencyKey *string    `json:"concurrency_key,omitempty"`
-	PausedAt       *time.Time `json:"paused_at,omitempty"`
-	DisabledAt     *time.Time `json:"disabled_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID                      string         `json:"id"`
+	Name                    string         `json:"name"`
+	TenantID                string         `json:"tenant_id"`
+	Queue                   string         `json:"queue"`
+	Kind                    string         `json:"kind"`
+	Payload                 map[string]any `json:"payload,omitempty"`
+	ScheduleType            string         `json:"schedule_type"`
+	CronExpr                *string        `json:"cron_expr,omitempty"`
+	Timezone                *string        `json:"timezone,omitempty"`
+	ConcurrencyKey          *string        `json:"concurrency_key,omitempty"`
+	Priority                int            `json:"priority"`
+	MaxRetries              int            `json:"max_retries"`
+	TimeoutSeconds          int            `json:"timeout_seconds"`
+	RetryBackoffBaseSeconds int            `json:"retry_backoff_base_seconds"`
+	PausedAt                *time.Time     `json:"paused_at,omitempty"`
+	DisabledAt              *time.Time     `json:"disabled_at,omitempty"`
+	CreatedAt               time.Time      `json:"created_at"`
+	UpdatedAt               time.Time      `json:"updated_at"`
 }
 
 type JobFilter struct {
@@ -70,6 +76,19 @@ type JobFilter struct {
 	Kind     string
 	Disabled *bool
 	Paused   *bool
+	Limit    int
+	Offset   int
+}
+
+type UpdateJobInput struct {
+	Name                    *string
+	Queue                   *string
+	Payload                 map[string]any
+	Priority                *int
+	MaxRetries              *int
+	TimeoutSeconds          *int
+	RetryBackoffBaseSeconds *int
+	ConcurrencyKey          *string
 }
 
 type RegisterWorkerInput struct {
@@ -259,6 +278,8 @@ type RunFilter struct {
 	WorkerID     string
 	JobID        string
 	DeadLettered *bool
+	Limit        int
+	Offset       int
 }
 
 type CancelJobResult struct {
@@ -448,7 +469,9 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 
 func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 	query := `
-		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, js.cron_expr, js.timezone, j.concurrency_key, j.paused_at, j.disabled_at, j.created_at
+		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.payload, j.schedule_type, js.cron_expr, js.timezone, j.concurrency_key,
+		       j.priority, j.max_retries, j.timeout_seconds, j.retry_backoff_base_seconds,
+		       j.paused_at, j.disabled_at, j.created_at, j.updated_at
 		FROM jobs j
 		LEFT JOIN job_schedules js ON js.job_id = j.id
 		WHERE 1=1
@@ -480,7 +503,14 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 			query += " AND j.paused_at IS NULL"
 		}
 	}
-	query += " ORDER BY j.created_at DESC LIMIT 100"
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	query += fmt.Sprintf(" ORDER BY j.created_at DESC LIMIT %d", limit)
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -491,13 +521,22 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 	var jobs []Job
 	for rows.Next() {
 		var job Job
+		var payloadBytes []byte
 		var cronExpr sql.NullString
 		var timezone sql.NullString
 		var concurrencyKey sql.NullString
 		var pausedAt sql.NullTime
 		var disabledAt sql.NullTime
-		if err := rows.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &job.ScheduleType, &cronExpr, &timezone, &concurrencyKey, &pausedAt, &disabledAt, &job.CreatedAt); err != nil {
+		if err := rows.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &payloadBytes, &job.ScheduleType, &cronExpr, &timezone, &concurrencyKey, &job.Priority, &job.MaxRetries, &job.TimeoutSeconds, &job.RetryBackoffBaseSeconds, &pausedAt, &disabledAt, &job.CreatedAt, &job.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan job: %w", err)
+		}
+		if len(payloadBytes) > 0 {
+			if err := json.Unmarshal(payloadBytes, &job.Payload); err != nil {
+				return nil, fmt.Errorf("unmarshal job payload: %w", err)
+			}
+		}
+		if job.Payload == nil {
+			job.Payload = map[string]any{}
 		}
 		if cronExpr.Valid {
 			value := cronExpr.String
@@ -531,20 +570,31 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 
 func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, js.cron_expr, js.timezone, j.concurrency_key, j.paused_at, j.disabled_at, j.created_at
+		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.payload, j.schedule_type, js.cron_expr, js.timezone, j.concurrency_key,
+		       j.priority, j.max_retries, j.timeout_seconds, j.retry_backoff_base_seconds,
+		       j.paused_at, j.disabled_at, j.created_at, j.updated_at
 		FROM jobs j
 		LEFT JOIN job_schedules js ON js.job_id = j.id
 		WHERE j.id = $1
 	`, jobID)
 
 	var job Job
+	var payloadBytes []byte
 	var cronExpr sql.NullString
 	var timezone sql.NullString
 	var concurrencyKey sql.NullString
 	var pausedAt sql.NullTime
 	var disabledAt sql.NullTime
-	if err := row.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &job.ScheduleType, &cronExpr, &timezone, &concurrencyKey, &pausedAt, &disabledAt, &job.CreatedAt); err != nil {
+	if err := row.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &payloadBytes, &job.ScheduleType, &cronExpr, &timezone, &concurrencyKey, &job.Priority, &job.MaxRetries, &job.TimeoutSeconds, &job.RetryBackoffBaseSeconds, &pausedAt, &disabledAt, &job.CreatedAt, &job.UpdatedAt); err != nil {
 		return Job{}, err
+	}
+	if len(payloadBytes) > 0 {
+		if err := json.Unmarshal(payloadBytes, &job.Payload); err != nil {
+			return Job{}, fmt.Errorf("unmarshal job payload: %w", err)
+		}
+	}
+	if job.Payload == nil {
+		job.Payload = map[string]any{}
 	}
 	if cronExpr.Valid {
 		value := cronExpr.String
@@ -568,6 +618,86 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 	}
 
 	return job, nil
+}
+
+func (s *Store) UpdateJob(ctx context.Context, jobID string, input UpdateJobInput, audit *AuditEventInput) (Job, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, fmt.Errorf("begin update job tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	current, err := s.GetJob(ctx, jobID)
+	if err != nil {
+		return Job{}, err
+	}
+	if current.DisabledAt != nil {
+		return Job{}, ErrConflict
+	}
+
+	name := current.Name
+	if input.Name != nil {
+		name = strings.TrimSpace(*input.Name)
+	}
+	queue := current.Queue
+	if input.Queue != nil {
+		queue = strings.TrimSpace(*input.Queue)
+	}
+	payload := current.Payload
+	if input.Payload != nil {
+		payload = input.Payload
+	}
+	priority := current.Priority
+	if input.Priority != nil {
+		priority = *input.Priority
+	}
+	maxRetries := current.MaxRetries
+	if input.MaxRetries != nil {
+		maxRetries = *input.MaxRetries
+	}
+	timeoutSeconds := current.TimeoutSeconds
+	if input.TimeoutSeconds != nil {
+		timeoutSeconds = *input.TimeoutSeconds
+	}
+	retryBackoffBaseSeconds := current.RetryBackoffBaseSeconds
+	if input.RetryBackoffBaseSeconds != nil {
+		retryBackoffBaseSeconds = *input.RetryBackoffBaseSeconds
+	}
+	concurrencyKey := ""
+	if current.ConcurrencyKey != nil {
+		concurrencyKey = *current.ConcurrencyKey
+	}
+	if input.ConcurrencyKey != nil {
+		concurrencyKey = strings.TrimSpace(*input.ConcurrencyKey)
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return Job{}, fmt.Errorf("marshal payload: %w", err)
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET name = $2,
+		    queue = $3,
+		    payload = $4::jsonb,
+		    priority = $5,
+		    max_retries = $6,
+		    timeout_seconds = $7,
+		    retry_backoff_base_seconds = $8,
+		    concurrency_key = NULLIF($9, ''),
+		    updated_at = $10
+		WHERE id = $1
+	`, jobID, name, queue, string(payloadJSON), priority, maxRetries, timeoutSeconds, retryBackoffBaseSeconds, concurrencyKey, now); err != nil {
+		return Job{}, fmt.Errorf("update job: %w", err)
+	}
+	if err := insertAuditEvent(ctx, tx, now, audit); err != nil {
+		return Job{}, fmt.Errorf("insert update audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Job{}, fmt.Errorf("commit update job tx: %w", err)
+	}
+	return s.GetJob(ctx, jobID)
 }
 
 func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
@@ -619,7 +749,14 @@ func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
 			query += " AND r.dead_lettered_at IS NULL"
 		}
 	}
-	query += " ORDER BY r.created_at DESC LIMIT 100"
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	query += fmt.Sprintf(" ORDER BY r.created_at DESC LIMIT %d", limit)
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -763,6 +900,76 @@ func (s *Store) ResumeJob(ctx context.Context, jobID string, audit *AuditEventIn
 	}
 	if err := tx.Commit(); err != nil {
 		return JobLifecycleResult{}, fmt.Errorf("commit resume job tx: %w", err)
+	}
+	return JobLifecycleResult{JobID: jobID, Status: "active"}, nil
+}
+
+func (s *Store) DisableJob(ctx context.Context, jobID string, audit *AuditEventInput) (JobLifecycleResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("begin disable job tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET disabled_at = COALESCE(disabled_at, $2),
+		    updated_at = $2
+		WHERE id = $1
+		  AND disabled_at IS NULL
+	`, jobID, now)
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("disable job: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("disable job rows affected: %w", err)
+	}
+	if affected == 0 {
+		return JobLifecycleResult{}, ErrConflict
+	}
+
+	if err := insertAuditEvent(ctx, tx, now, audit); err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("insert disable audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("commit disable job tx: %w", err)
+	}
+	return JobLifecycleResult{JobID: jobID, Status: "disabled"}, nil
+}
+
+func (s *Store) EnableJob(ctx context.Context, jobID string, audit *AuditEventInput) (JobLifecycleResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("begin enable job tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET disabled_at = NULL,
+		    updated_at = $2
+		WHERE id = $1
+		  AND disabled_at IS NOT NULL
+	`, jobID, now)
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("enable job: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("enable job rows affected: %w", err)
+	}
+	if affected == 0 {
+		return JobLifecycleResult{}, ErrConflict
+	}
+
+	if err := insertAuditEvent(ctx, tx, now, audit); err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("insert enable audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return JobLifecycleResult{}, fmt.Errorf("commit enable job tx: %w", err)
 	}
 	return JobLifecycleResult{JobID: jobID, Status: "active"}, nil
 }

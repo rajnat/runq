@@ -87,6 +87,9 @@ func (s *Server) routes() {
 	s.handle("GET /v1/auth/me", s.handleAuthMe)
 	s.handle("GET /v1/jobs", s.handleListJobs)
 	s.handle("GET /v1/jobs/{jobID}", s.handleGetJob)
+	s.handle("PATCH /v1/jobs/{jobID}", s.handleUpdateJob)
+	s.handle("POST /v1/jobs/{jobID}/disable", s.handleDisableJob)
+	s.handle("POST /v1/jobs/{jobID}/enable", s.handleEnableJob)
 	s.handle("POST /v1/jobs/{jobID}/pause", s.handlePauseJob)
 	s.handle("POST /v1/jobs/{jobID}/resume", s.handleResumeJob)
 	s.handle("POST /v1/jobs/{jobID}/trigger", s.handleTriggerJob)
@@ -227,6 +230,16 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "paused must be true or false")
 		return
 	}
+	limit, err := parseOptionalInt(r.URL.Query().Get("limit"), 1)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
+		return
+	}
+	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
+		return
+	}
 
 	filterTenantID, allowed := authorizedTenantFilter(principal, r.URL.Query().Get("tenant_id"))
 	if !allowed {
@@ -240,6 +253,8 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		Kind:     r.URL.Query().Get("kind"),
 		Disabled: disabled,
 		Paused:   paused,
+		Limit:    limit,
+		Offset:   offset,
 	})
 	if err != nil {
 		s.logger.Printf("list jobs failed: %v", err)
@@ -279,6 +294,150 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot update jobs")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	job, err := s.store.GetJob(ctx, r.PathValue("jobID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		s.logger.Printf("load job for update failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load job")
+		return
+	}
+	if !canAccessTenant(principal, job.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	var req UpdateJobRequest
+	if ok := decodeJSONBody(w, r, &req); !ok {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+
+	updated, err := s.store.UpdateJob(ctx, job.ID, store.UpdateJobInput{
+		Name:                    req.Name,
+		Queue:                   req.Queue,
+		Payload:                 req.Payload,
+		Priority:                req.Priority,
+		MaxRetries:              req.MaxRetries,
+		TimeoutSeconds:          req.TimeoutSeconds,
+		RetryBackoffBaseSeconds: req.RetryBackoffBaseSeconds,
+		ConcurrencyKey:          req.ConcurrencyKey,
+	}, s.auditInput(principal, "JOB_UPDATE", "job", job.ID, job.TenantID, nil))
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "JOB_UPDATE_CONFLICT", "job cannot be updated in its current state")
+			return
+		}
+		s.logger.Printf("update job failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update job")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"job": updated})
+}
+
+func (s *Server) handleDisableJob(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot disable jobs")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	job, err := s.store.GetJob(ctx, r.PathValue("jobID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		s.logger.Printf("load job for disable failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load job")
+		return
+	}
+	if !canAccessTenant(principal, job.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	result, err := s.store.DisableJob(ctx, job.ID, s.auditInput(principal, "JOB_DISABLE", "job", job.ID, job.TenantID, nil))
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "JOB_DISABLE_CONFLICT", "job cannot be disabled in its current state")
+			return
+		}
+		s.logger.Printf("disable job failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to disable job")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, JobLifecycleResponse{JobID: result.JobID, Status: result.Status})
+}
+
+func (s *Server) handleEnableJob(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot enable jobs")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	job, err := s.store.GetJob(ctx, r.PathValue("jobID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		s.logger.Printf("load job for enable failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load job")
+		return
+	}
+	if !canAccessTenant(principal, job.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	result, err := s.store.EnableJob(ctx, job.ID, s.auditInput(principal, "JOB_ENABLE", "job", job.ID, job.TenantID, nil))
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "JOB_ENABLE_CONFLICT", "job cannot be enabled in its current state")
+			return
+		}
+		s.logger.Printf("enable job failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to enable job")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, JobLifecycleResponse{JobID: result.JobID, Status: result.Status})
 }
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
@@ -643,6 +802,16 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "dead_lettered must be true or false")
 		return
 	}
+	limit, err := parseOptionalInt(r.URL.Query().Get("limit"), 1)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
+		return
+	}
+	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
+		return
+	}
 
 	runs, err := s.store.ListRuns(ctx, store.RunFilter{
 		TenantID:     filterTenantID,
@@ -651,6 +820,8 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		WorkerID:     r.URL.Query().Get("worker_id"),
 		JobID:        r.URL.Query().Get("job_id"),
 		DeadLettered: deadLettered,
+		Limit:        limit,
+		Offset:       offset,
 	})
 	if err != nil {
 		s.logger.Printf("list runs failed: %v", err)

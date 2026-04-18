@@ -181,17 +181,149 @@ func TestGetJobEndpointReturnsCreatedJob(t *testing.T) {
 	}
 }
 
-func TestCancelJobEndpointCancelsPendingRun(t *testing.T) {
+func TestUpdateJobEndpoint(t *testing.T) {
 	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
 
 	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
-	queue := "api-cancel-" + time.Now().UTC().Format("150405.000000000")
+	queue := "api-update-" + time.Now().UTC().Format("150405.000000000")
 	var createResp CreateJobResponse
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
-		"name":      "api-cancel-test",
+		"name":      "api-update-test",
+		"tenant_id": "tenant-api",
+		"queue":     queue,
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/original"},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", status)
+	}
+
+	var updateResp struct {
+		Job store.Job `json:"job"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPatch, httpServer.URL+"/v1/jobs/"+createResp.JobID, map[string]any{
+		"name":                       "api-update-test-v2",
+		"queue":                      queue + "-updated",
+		"payload":                    map[string]any{"url": "https://example.internal/updated", "method": "POST"},
+		"priority":                   7,
+		"max_retries":                8,
+		"timeout_seconds":            45,
+		"retry_backoff_base_seconds": 9,
+		"concurrency_key":            "tenant-api:updated",
+	}, &updateResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 patch job, got %d", status)
+	}
+	if updateResp.Job.Name != "api-update-test-v2" || updateResp.Job.Queue != queue+"-updated" {
+		t.Fatalf("unexpected patch response: %+v", updateResp.Job)
+	}
+	if updateResp.Job.Priority != 7 || updateResp.Job.MaxRetries != 8 || updateResp.Job.TimeoutSeconds != 45 || updateResp.Job.RetryBackoffBaseSeconds != 9 {
+		t.Fatalf("expected numeric updates to round-trip, got %+v", updateResp.Job)
+	}
+	if updateResp.Job.ConcurrencyKey == nil || *updateResp.Job.ConcurrencyKey != "tenant-api:updated" {
+		t.Fatalf("expected concurrency key update, got %+v", updateResp.Job)
+	}
+	if updateResp.Job.Payload["method"] != "POST" {
+		t.Fatalf("expected payload update, got %+v", updateResp.Job.Payload)
+	}
+}
+
+func TestListJobsSupportsLimitAndOffset(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	createdJobIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		var createResp CreateJobResponse
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+			"name":      "api-pagination-job-" + string(rune('a'+i)),
+			"tenant_id": "tenant-api",
+			"queue":     "api-pagination-jobs",
+			"kind":      "http",
+			"payload":   map[string]any{"index": i},
+		}, &createResp)
+		if status != http.StatusAccepted {
+			t.Fatalf("expected 202 creating job %d, got %d", i, status)
+		}
+		createdJobIDs = append([]string{createResp.JobID}, createdJobIDs...)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var jobsResp struct {
+		Jobs []store.Job `json:"jobs"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&limit=2&offset=1", nil, &jobsResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing jobs, got %d", status)
+	}
+	if len(jobsResp.Jobs) != 2 {
+		t.Fatalf("expected 2 jobs after pagination, got %+v", jobsResp.Jobs)
+	}
+	if jobsResp.Jobs[0].ID != createdJobIDs[1] || jobsResp.Jobs[1].ID != createdJobIDs[2] {
+		t.Fatalf("unexpected paginated jobs: %+v expected ids=%+v", jobsResp.Jobs, createdJobIDs)
+	}
+}
+
+func TestListRunsSupportsLimitAndOffset(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	createdRunIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		var createResp CreateJobResponse
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+			"name":      "api-pagination-run-" + string(rune('a'+i)),
+			"tenant_id": "tenant-api",
+			"queue":     "api-pagination-runs",
+			"kind":      "http",
+			"payload":   map[string]any{"index": i},
+		}, &createResp)
+		if status != http.StatusAccepted {
+			t.Fatalf("expected 202 creating job %d, got %d", i, status)
+		}
+		createdRunIDs = append([]string{*createResp.RunID}, createdRunIDs...)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var runsResp struct {
+		Runs []store.Run `json:"runs"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs?tenant_id=tenant-api&limit=2&offset=1", nil, &runsResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing runs, got %d", status)
+	}
+	if len(runsResp.Runs) != 2 {
+		t.Fatalf("expected 2 runs after pagination, got %+v", runsResp.Runs)
+	}
+	if runsResp.Runs[0].ID != createdRunIDs[1] || runsResp.Runs[1].ID != createdRunIDs[2] {
+		t.Fatalf("unexpected paginated runs: %+v expected ids=%+v", runsResp.Runs, createdRunIDs)
+	}
+}
+
+func TestDisableAndEnableJobEndpoints(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	queue := "api-disable-" + time.Now().UTC().Format("150405.000000000")
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-disable-test",
 		"tenant_id": "tenant-api",
 		"queue":     queue,
 		"kind":      "http",
@@ -203,22 +335,52 @@ func TestCancelJobEndpointCancelsPendingRun(t *testing.T) {
 		t.Fatalf("expected 202, got %d", status)
 	}
 
-	var cancelResp CancelJobResponse
-	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/"+createResp.JobID+"/cancel", nil, &cancelResp)
+	var disableResp JobLifecycleResponse
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/"+createResp.JobID+"/disable", nil, &disableResp)
 	if status != http.StatusOK {
-		t.Fatalf("expected 200 cancel response, got %d", status)
+		t.Fatalf("expected 200 disable response, got %d", status)
 	}
-	if cancelResp.CanceledRuns != 1 {
-		t.Fatalf("expected one canceled run, got %+v", cancelResp)
+	if disableResp.Status != "disabled" {
+		t.Fatalf("expected disabled lifecycle response, got %+v", disableResp)
 	}
 
-	var runResp GetRunResponse
-	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs/"+*createResp.RunID, nil, &runResp)
-	if status != http.StatusOK {
-		t.Fatalf("expected 200 get run, got %d", status)
+	var jobResp struct {
+		Job store.Job `json:"job"`
 	}
-	if runResp.Run.Status != "CANCELED" {
-		t.Fatalf("expected canceled run, got %+v", runResp.Run)
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs/"+createResp.JobID, nil, &jobResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 get job, got %d", status)
+	}
+	if jobResp.Job.DisabledAt == nil {
+		t.Fatalf("expected job to be disabled, got %+v", jobResp.Job)
+	}
+
+	var disabledJobs struct {
+		Jobs []store.Job `json:"jobs"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&disabled=true", nil, &disabledJobs)
+	if status != http.StatusOK || len(disabledJobs.Jobs) != 1 || disabledJobs.Jobs[0].ID != createResp.JobID {
+		t.Fatalf("expected disabled job in filtered list, got status=%d jobs=%+v", status, disabledJobs.Jobs)
+	}
+
+	var enableResp JobLifecycleResponse
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/"+createResp.JobID+"/enable", nil, &enableResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 enable response, got %d", status)
+	}
+	if enableResp.Status != "active" {
+		t.Fatalf("expected active lifecycle response after enable, got %+v", enableResp)
+	}
+
+	var enabledJobResp struct {
+		Job store.Job `json:"job"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs/"+createResp.JobID, nil, &enabledJobResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 get job after enable, got %d", status)
+	}
+	if enabledJobResp.Job.DisabledAt != nil {
+		t.Fatalf("expected job to be enabled, got %+v", enabledJobResp.Job)
 	}
 }
 
