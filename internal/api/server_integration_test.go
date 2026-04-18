@@ -94,6 +94,93 @@ func TestCreateJobAndListRunsEndpoints(t *testing.T) {
 	}
 }
 
+func TestCreateDelayedJobEndpoint(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	runAt := time.Now().UTC().Add(30 * time.Minute).Truncate(time.Second)
+	queue := "api-delayed-" + time.Now().UTC().Format("150405.000000000")
+
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-delayed-test",
+		"tenant_id": "tenant-api",
+		"queue":     queue,
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/delayed"},
+		"schedule": map[string]any{
+			"type":   "delayed",
+			"run_at": runAt.Format(time.RFC3339),
+		},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", status)
+	}
+	if createResp.RunID == nil || *createResp.RunID == "" {
+		t.Fatalf("expected delayed job to create a pending run, got %+v", createResp)
+	}
+
+	var jobResp struct {
+		Job store.Job `json:"job"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs/"+createResp.JobID, nil, &jobResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 get job, got %d", status)
+	}
+	if jobResp.Job.ScheduleType != "delayed" {
+		t.Fatalf("expected delayed schedule type, got %+v", jobResp.Job)
+	}
+
+	var runResp GetRunResponse
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs/"+*createResp.RunID, nil, &runResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 get run, got %d", status)
+	}
+	if !runResp.Run.ScheduledAt.Equal(runAt) {
+		t.Fatalf("expected scheduled_at %s, got %+v", runAt.Format(time.RFC3339), runResp.Run)
+	}
+	if !runResp.Run.AvailableAt.Equal(runAt) {
+		t.Fatalf("expected available_at %s, got %+v", runAt.Format(time.RFC3339), runResp.Run)
+	}
+}
+
+func TestGetJobEndpointReturnsCreatedJob(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	queue := "api-get-job-" + time.Now().UTC().Format("150405.000000000")
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-get-job-test",
+		"tenant_id": "tenant-api",
+		"queue":     queue,
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/get-job"},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", status)
+	}
+
+	var jobResp struct {
+		Job store.Job `json:"job"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs/"+createResp.JobID, nil, &jobResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 get job, got %d", status)
+	}
+	if jobResp.Job.ID != createResp.JobID || jobResp.Job.Name != "api-get-job-test" || jobResp.Job.Queue != queue {
+		t.Fatalf("unexpected job response: %+v", jobResp.Job)
+	}
+}
+
 func TestCancelJobEndpointCancelsPendingRun(t *testing.T) {
 	jobStore := openTestStore(t)
 

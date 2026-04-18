@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/eswar/runq/internal/store"
 )
@@ -26,6 +27,7 @@ type Schedule struct {
 	Type     string `json:"type"`
 	Cron     string `json:"cron,omitempty"`
 	Timezone string `json:"timezone,omitempty"`
+	RunAt    string `json:"run_at,omitempty"`
 }
 
 type CreateJobResponse struct {
@@ -168,12 +170,32 @@ func (r CreateJobRequest) Validate() error {
 			if strings.TrimSpace(r.Schedule.Timezone) != "" {
 				return errors.New("schedule.timezone is only valid for cron schedules")
 			}
+			if strings.TrimSpace(r.Schedule.RunAt) != "" {
+				return errors.New("schedule.run_at is only valid for delayed schedules")
+			}
+		case "delayed":
+			if strings.TrimSpace(r.Schedule.Cron) != "" {
+				return errors.New("schedule.cron is only valid for cron schedules")
+			}
+			if strings.TrimSpace(r.Schedule.Timezone) != "" {
+				return errors.New("schedule.timezone is only valid for cron schedules")
+			}
+			runAt := strings.TrimSpace(r.Schedule.RunAt)
+			if runAt == "" {
+				return errors.New("schedule.run_at is required for delayed schedules")
+			}
+			if _, err := time.Parse(time.RFC3339, runAt); err != nil {
+				return errors.New("schedule.run_at must be a valid RFC3339 timestamp")
+			}
 		case "cron":
 			if strings.TrimSpace(r.Schedule.Cron) == "" {
 				return errors.New("schedule.cron is required for cron schedules")
 			}
+			if strings.TrimSpace(r.Schedule.RunAt) != "" {
+				return errors.New("schedule.run_at is only valid for delayed schedules")
+			}
 		default:
-			return errors.New("schedule.type must be one of once or cron")
+			return errors.New("schedule.type must be one of once, delayed, or cron")
 		}
 	}
 	return nil
@@ -264,6 +286,13 @@ func (r CreateJobRequest) ToStoreInput() store.CreateJobInput {
 	input.ScheduleType = strings.TrimSpace(r.Schedule.Type)
 	input.CronExpr = strings.TrimSpace(r.Schedule.Cron)
 	input.Timezone = strings.TrimSpace(r.Schedule.Timezone)
+	if input.ScheduleType == "delayed" {
+		runAt, err := time.Parse(time.RFC3339, strings.TrimSpace(r.Schedule.RunAt))
+		if err == nil {
+			utc := runAt.UTC()
+			input.RunAt = &utc
+		}
+	}
 	if input.Timezone == "" {
 		input.Timezone = "UTC"
 	}

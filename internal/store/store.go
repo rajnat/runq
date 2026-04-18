@@ -35,6 +35,7 @@ type CreateJobInput struct {
 	ScheduleType            string
 	CronExpr                string
 	Timezone                string
+	RunAt                   *time.Time
 	ConcurrencyKey          string
 	Priority                int
 	MaxRetries              int
@@ -328,7 +329,7 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 	if err != nil {
 		return CreateJobResult{}, err
 	}
-	if err := enforceTenantJobAdmission(ctx, tx, tenantID, quota, input.ScheduleType == "once"); err != nil {
+	if err := enforceTenantJobAdmission(ctx, tx, tenantID, quota, input.ScheduleType != "cron"); err != nil {
 		return CreateJobResult{}, err
 	}
 
@@ -412,12 +413,17 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 		return CreateJobResult{}, err
 	}
 
+	scheduledAt := now
+	if input.RunAt != nil {
+		scheduledAt = input.RunAt.UTC()
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO runs (
 			id, job_id, status, attempt, scheduled_at, available_at, created_at, updated_at
 		)
-		VALUES ($1, $2, 'PENDING', 0, NOW(), NOW(), NOW(), NOW())
-	`, runID, jobID)
+		VALUES ($1, $2, 'PENDING', 0, $3, $3, NOW(), NOW())
+	`, runID, jobID, scheduledAt)
 	if err != nil {
 		return CreateJobResult{}, fmt.Errorf("insert run: %w", err)
 	}

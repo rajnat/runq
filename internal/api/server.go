@@ -86,6 +86,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/metrics", s.metrics.Handler())
 	s.handle("GET /v1/auth/me", s.handleAuthMe)
 	s.handle("GET /v1/jobs", s.handleListJobs)
+	s.handle("GET /v1/jobs/{jobID}", s.handleGetJob)
 	s.handle("POST /v1/jobs/{jobID}/pause", s.handlePauseJob)
 	s.handle("POST /v1/jobs/{jobID}/resume", s.handleResumeJob)
 	s.handle("POST /v1/jobs/{jobID}/trigger", s.handleTriggerJob)
@@ -247,6 +248,37 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+}
+
+func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot get jobs")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	job, err := s.store.GetJob(ctx, r.PathValue("jobID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		s.logger.Printf("get job failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load job")
+		return
+	}
+	if !canAccessTenant(principal, job.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"job": job})
 }
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
