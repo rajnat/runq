@@ -240,6 +240,11 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
 		return
 	}
+	cursor, err := decodePageCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
 
 	filterTenantID, allowed := authorizedTenantFilter(principal, r.URL.Query().Get("tenant_id"))
 	if !allowed {
@@ -247,7 +252,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs, hasMore, err := s.store.ListJobsPage(ctx, store.JobFilter{
+	jobs, hasMore, nextBoundary, err := s.store.ListJobsPage(ctx, store.JobFilter{
 		TenantID: filterTenantID,
 		Queue:    r.URL.Query().Get("queue"),
 		Kind:     r.URL.Query().Get("kind"),
@@ -255,16 +260,25 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		Paused:   paused,
 		Limit:    limit,
 		Offset:   offset,
+		Cursor:   cursor,
 	})
 	if err != nil {
 		s.logger.Printf("list jobs failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list jobs")
 		return
 	}
+	nextCursor, err := encodePageCursor(nextBoundary)
+	if err != nil {
+		s.logger.Printf("encode jobs cursor failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build jobs pagination")
+		return
+	}
+	pagination := paginationMeta(limit, offset, len(jobs), hasMore)
+	pagination.NextCursor = nextCursor
 
 	writeJSON(w, http.StatusOK, ListJobsResponse{
 		Jobs: jobs,
-		Pagination: paginationMeta(limit, offset, len(jobs), hasMore),
+		Pagination: pagination,
 	})
 }
 
@@ -340,6 +354,10 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		Name:                    req.Name,
 		Queue:                   req.Queue,
 		Payload:                 req.Payload,
+		ScheduleType:            scheduleTypePtr(req.Schedule),
+		CronExpr:                scheduleCronPtr(req.Schedule),
+		Timezone:                scheduleTimezonePtr(req.Schedule),
+		RunAt:                   scheduleRunAtPtr(req.Schedule),
 		Priority:                req.Priority,
 		MaxRetries:              req.MaxRetries,
 		TimeoutSeconds:          req.TimeoutSeconds,
@@ -815,8 +833,13 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
 		return
 	}
+	cursor, err := decodePageCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
 
-	runs, hasMore, err := s.store.ListRunsPage(ctx, store.RunFilter{
+	runs, hasMore, nextBoundary, err := s.store.ListRunsPage(ctx, store.RunFilter{
 		TenantID:     filterTenantID,
 		Statuses:     strings.Split(r.URL.Query().Get("status"), ","),
 		Queue:        r.URL.Query().Get("queue"),
@@ -825,6 +848,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		DeadLettered: deadLettered,
 		Limit:        limit,
 		Offset:       offset,
+		Cursor:       cursor,
 	})
 	if err != nil {
 		s.logger.Printf("list runs failed: %v", err)
@@ -832,10 +856,18 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list runs")
 		return
 	}
+	nextCursor, err := encodePageCursor(nextBoundary)
+	if err != nil {
+		s.logger.Printf("encode runs cursor failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build runs pagination")
+		return
+	}
+	pagination := paginationMeta(limit, offset, len(runs), hasMore)
+	pagination.NextCursor = nextCursor
 
 	writeJSON(w, http.StatusOK, ListRunsResponse{
 		Runs: runs,
-		Pagination: paginationMeta(limit, offset, len(runs), hasMore),
+		Pagination: pagination,
 	})
 }
 

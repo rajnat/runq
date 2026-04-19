@@ -232,6 +232,120 @@ func TestUpdateJobEndpoint(t *testing.T) {
 	}
 }
 
+func TestUpdateDelayedJobSchedule(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	initialRunAt := time.Now().UTC().Add(30 * time.Minute).Truncate(time.Second)
+	updatedRunAt := initialRunAt.Add(45 * time.Minute)
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-update-delayed",
+		"tenant_id": "tenant-api",
+		"queue":     "api-update-delayed",
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/delayed"},
+		"schedule": map[string]any{
+			"type":   "delayed",
+			"run_at": initialRunAt.Format(time.RFC3339),
+		},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202 create delayed job, got %d", status)
+	}
+
+	var updateResp struct {
+		Job store.Job `json:"job"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPatch, httpServer.URL+"/v1/jobs/"+createResp.JobID, map[string]any{
+		"schedule": map[string]any{
+			"type":   "delayed",
+			"run_at": updatedRunAt.Format(time.RFC3339),
+		},
+	}, &updateResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 patch delayed job, got %d", status)
+	}
+	if updateResp.Job.ScheduleType != "delayed" {
+		t.Fatalf("expected delayed schedule type, got %+v", updateResp.Job)
+	}
+
+	var runResp GetRunResponse
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs/"+*createResp.RunID, nil, &runResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 get delayed run, got %d", status)
+	}
+	if !runResp.Run.ScheduledAt.Equal(updatedRunAt) || !runResp.Run.AvailableAt.Equal(updatedRunAt) {
+		t.Fatalf("expected delayed run timestamps to update to %s, got %+v", updatedRunAt.Format(time.RFC3339), runResp.Run)
+	}
+}
+
+func TestUpdateCronJobSchedule(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-update-cron",
+		"tenant_id": "tenant-api",
+		"queue":     "api-update-cron",
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/cron"},
+		"schedule": map[string]any{
+			"type":     "cron",
+			"cron":     "*/5 * * * *",
+			"timezone": "UTC",
+		},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202 create cron job, got %d", status)
+	}
+
+	var beforeNextRunAt time.Time
+	if err := jobStore.DB().QueryRowContext(context.Background(), `SELECT next_run_at FROM job_schedules WHERE job_id = $1`, createResp.JobID).Scan(&beforeNextRunAt); err != nil {
+		t.Fatalf("load cron schedule before update: %v", err)
+	}
+
+	var updateResp struct {
+		Job store.Job `json:"job"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPatch, httpServer.URL+"/v1/jobs/"+createResp.JobID, map[string]any{
+		"schedule": map[string]any{
+			"type":     "cron",
+			"cron":     "0 * * * *",
+			"timezone": "America/New_York",
+		},
+	}, &updateResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 patch cron job, got %d", status)
+	}
+	if updateResp.Job.ScheduleType != "cron" {
+		t.Fatalf("expected cron schedule type, got %+v", updateResp.Job)
+	}
+	if updateResp.Job.CronExpr == nil || *updateResp.Job.CronExpr != "0 * * * *" {
+		t.Fatalf("expected updated cron expression, got %+v", updateResp.Job)
+	}
+	if updateResp.Job.Timezone == nil || *updateResp.Job.Timezone != "America/New_York" {
+		t.Fatalf("expected updated timezone, got %+v", updateResp.Job)
+	}
+
+	var afterNextRunAt time.Time
+	if err := jobStore.DB().QueryRowContext(context.Background(), `SELECT next_run_at FROM job_schedules WHERE job_id = $1`, createResp.JobID).Scan(&afterNextRunAt); err != nil {
+		t.Fatalf("load cron schedule after update: %v", err)
+	}
+	if !afterNextRunAt.After(beforeNextRunAt) {
+		t.Fatalf("expected next_run_at to be recomputed, before=%s after=%s", beforeNextRunAt, afterNextRunAt)
+	}
+}
+
 func TestListJobsSupportsLimitAndOffset(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)
@@ -323,6 +437,106 @@ func TestListRunsSupportsLimitAndOffset(t *testing.T) {
 	}
 	if runsResp.Pagination.NextOffset != nil {
 		t.Fatalf("expected no next_offset, got %+v", runsResp.Pagination)
+	}
+}
+
+func TestListJobsSupportsCursorPagination(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	createdJobIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		var createResp CreateJobResponse
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+			"name":      "api-cursor-job-" + string(rune('a'+i)),
+			"tenant_id": "tenant-api",
+			"queue":     "api-cursor-jobs",
+			"kind":      "http",
+			"payload":   map[string]any{"index": i},
+		}, &createResp)
+		if status != http.StatusAccepted {
+			t.Fatalf("expected 202 creating job %d, got %d", i, status)
+		}
+		createdJobIDs = append([]string{createResp.JobID}, createdJobIDs...)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	firstPage := ListJobsResponse{}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&limit=2", nil, &firstPage)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing first jobs page, got %d", status)
+	}
+	if len(firstPage.Jobs) != 2 || !firstPage.Pagination.HasMore || firstPage.Pagination.NextCursor == nil {
+		t.Fatalf("expected first jobs page with next cursor, got %+v", firstPage)
+	}
+	if firstPage.Jobs[0].ID != createdJobIDs[0] || firstPage.Jobs[1].ID != createdJobIDs[1] {
+		t.Fatalf("unexpected first jobs page: %+v expected ids=%+v", firstPage.Jobs, createdJobIDs)
+	}
+
+	secondPage := ListJobsResponse{}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&limit=2&cursor="+*firstPage.Pagination.NextCursor, nil, &secondPage)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing second jobs page, got %d", status)
+	}
+	if len(secondPage.Jobs) != 1 || secondPage.Jobs[0].ID != createdJobIDs[2] {
+		t.Fatalf("unexpected second jobs page: %+v expected ids=%+v", secondPage.Jobs, createdJobIDs)
+	}
+	if secondPage.Pagination.HasMore || secondPage.Pagination.NextCursor != nil {
+		t.Fatalf("expected final jobs page without next cursor, got %+v", secondPage.Pagination)
+	}
+}
+
+func TestListRunsSupportsCursorPagination(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	createdRunIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		var createResp CreateJobResponse
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+			"name":      "api-cursor-run-" + string(rune('a'+i)),
+			"tenant_id": "tenant-api",
+			"queue":     "api-cursor-runs",
+			"kind":      "http",
+			"payload":   map[string]any{"index": i},
+		}, &createResp)
+		if status != http.StatusAccepted {
+			t.Fatalf("expected 202 creating run source job %d, got %d", i, status)
+		}
+		createdRunIDs = append([]string{*createResp.RunID}, createdRunIDs...)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	firstPage := ListRunsResponse{}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs?tenant_id=tenant-api&limit=2", nil, &firstPage)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing first runs page, got %d", status)
+	}
+	if len(firstPage.Runs) != 2 || !firstPage.Pagination.HasMore || firstPage.Pagination.NextCursor == nil {
+		t.Fatalf("expected first runs page with next cursor, got %+v", firstPage)
+	}
+	if firstPage.Runs[0].ID != createdRunIDs[0] || firstPage.Runs[1].ID != createdRunIDs[1] {
+		t.Fatalf("unexpected first runs page: %+v expected ids=%+v", firstPage.Runs, createdRunIDs)
+	}
+
+	secondPage := ListRunsResponse{}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs?tenant_id=tenant-api&limit=2&cursor="+*firstPage.Pagination.NextCursor, nil, &secondPage)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing second runs page, got %d", status)
+	}
+	if len(secondPage.Runs) != 1 || secondPage.Runs[0].ID != createdRunIDs[2] {
+		t.Fatalf("unexpected second runs page: %+v expected ids=%+v", secondPage.Runs, createdRunIDs)
+	}
+	if secondPage.Pagination.HasMore || secondPage.Pagination.NextCursor != nil {
+		t.Fatalf("expected final runs page without next cursor, got %+v", secondPage.Pagination)
 	}
 }
 

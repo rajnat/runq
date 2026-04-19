@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -41,6 +43,7 @@ type UpdateJobRequest struct {
 	Name                    *string        `json:"name,omitempty"`
 	Queue                   *string        `json:"queue,omitempty"`
 	Payload                 map[string]any `json:"payload,omitempty"`
+	Schedule                *Schedule      `json:"schedule,omitempty"`
 	Priority                *int           `json:"priority,omitempty"`
 	MaxRetries              *int           `json:"max_retries,omitempty"`
 	TimeoutSeconds          *int           `json:"timeout_seconds,omitempty"`
@@ -117,11 +120,12 @@ type GetRunResponse struct {
 }
 
 type PaginationMeta struct {
-	Limit      int  `json:"limit"`
-	Offset     int  `json:"offset"`
-	Returned   int  `json:"returned"`
-	HasMore    bool `json:"has_more"`
-	NextOffset *int `json:"next_offset,omitempty"`
+	Limit      int     `json:"limit"`
+	Offset     int     `json:"offset"`
+	Returned   int     `json:"returned"`
+	HasMore    bool    `json:"has_more"`
+	NextOffset *int    `json:"next_offset,omitempty"`
+	NextCursor *string `json:"next_cursor,omitempty"`
 }
 
 type ListJobsResponse struct {
@@ -237,6 +241,36 @@ func (r UpdateJobRequest) Validate() error {
 	}
 	if r.Queue != nil && strings.TrimSpace(*r.Queue) == "" {
 		return errors.New("queue must not be blank")
+	}
+	if r.Schedule != nil {
+		scheduleType := strings.TrimSpace(r.Schedule.Type)
+		if scheduleType == "" {
+			return errors.New("schedule.type is required")
+		}
+		switch scheduleType {
+		case "delayed":
+			runAt := strings.TrimSpace(r.Schedule.RunAt)
+			if runAt == "" {
+				return errors.New("schedule.run_at is required for delayed schedules")
+			}
+			if strings.TrimSpace(r.Schedule.Cron) != "" || strings.TrimSpace(r.Schedule.Timezone) != "" {
+				return errors.New("delayed schedule updates only support run_at")
+			}
+			if _, err := time.Parse(time.RFC3339, runAt); err != nil {
+				return errors.New("schedule.run_at must be a valid RFC3339 timestamp")
+			}
+		case "cron":
+			if strings.TrimSpace(r.Schedule.RunAt) != "" {
+				return errors.New("schedule.run_at is only valid for delayed schedules")
+			}
+			if strings.TrimSpace(r.Schedule.Cron) == "" && strings.TrimSpace(r.Schedule.Timezone) == "" {
+				return errors.New("cron schedule updates require cron or timezone")
+			}
+		case "once":
+			return errors.New("once schedules cannot be mutated")
+		default:
+			return errors.New("schedule.type must be one of delayed or cron")
+		}
 	}
 	if r.Priority != nil && *r.Priority <= 0 {
 		return errors.New("priority must be greater than zero")
@@ -405,6 +439,55 @@ func parseOptionalInt(value string, minimum int) (int, error) {
 	return parsed, nil
 }
 
+func scheduleTypePtr(schedule *Schedule) *string {
+	if schedule == nil {
+		return nil
+	}
+	value := strings.TrimSpace(schedule.Type)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func scheduleCronPtr(schedule *Schedule) *string {
+	if schedule == nil {
+		return nil
+	}
+	value := strings.TrimSpace(schedule.Cron)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func scheduleTimezonePtr(schedule *Schedule) *string {
+	if schedule == nil {
+		return nil
+	}
+	value := strings.TrimSpace(schedule.Timezone)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func scheduleRunAtPtr(schedule *Schedule) *time.Time {
+	if schedule == nil {
+		return nil
+	}
+	value := strings.TrimSpace(schedule.RunAt)
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil
+	}
+	utc := parsed.UTC()
+	return &utc
+}
+
 func paginationMeta(limit, offset, returned int, hasMore bool) PaginationMeta {
 	meta := PaginationMeta{
 		Limit:    limit,
@@ -417,4 +500,44 @@ func paginationMeta(limit, offset, returned int, hasMore bool) PaginationMeta {
 		meta.NextOffset = &next
 	}
 	return meta
+}
+
+type encodedCursor struct {
+	CreatedAt string `json:"created_at"`
+	ID        string `json:"id"`
+}
+
+func encodePageCursor(boundary *store.PageBoundary) (*string, error) {
+	if boundary == nil {
+		return nil, nil
+	}
+	payload, err := json.Marshal(encodedCursor{CreatedAt: boundary.CreatedAt.UTC().Format(time.RFC3339Nano), ID: boundary.ID})
+	if err != nil {
+		return nil, err
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	return &encoded, nil
+}
+
+func decodePageCursor(value string) (*store.PageBoundary, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return nil, errors.New("cursor must be valid base64url")
+	}
+	var payload encodedCursor
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return nil, errors.New("cursor must be valid JSON")
+	}
+	if payload.ID == "" || payload.CreatedAt == "" {
+		return nil, errors.New("cursor is missing required fields")
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, payload.CreatedAt)
+	if err != nil {
+		return nil, errors.New("cursor created_at must be RFC3339Nano")
+	}
+	return &store.PageBoundary{CreatedAt: createdAt.UTC(), ID: payload.ID}, nil
 }

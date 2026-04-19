@@ -78,12 +78,22 @@ type JobFilter struct {
 	Paused   *bool
 	Limit    int
 	Offset   int
+	Cursor   *PageBoundary
+}
+
+type PageBoundary struct {
+	CreatedAt time.Time
+	ID        string
 }
 
 type UpdateJobInput struct {
 	Name                    *string
 	Queue                   *string
 	Payload                 map[string]any
+	ScheduleType            *string
+	CronExpr                *string
+	Timezone                *string
+	RunAt                   *time.Time
 	Priority                *int
 	MaxRetries              *int
 	TimeoutSeconds          *int
@@ -280,6 +290,7 @@ type RunFilter struct {
 	DeadLettered *bool
 	Limit        int
 	Offset       int
+	Cursor       *PageBoundary
 }
 
 type CancelJobResult struct {
@@ -473,11 +484,11 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 }
 
 func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
-	jobs, _, err := s.ListJobsPage(ctx, filter)
+	jobs, _, _, err := s.ListJobsPage(ctx, filter)
 	return jobs, err
 }
 
-func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool, error) {
+func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool, *PageBoundary, error) {
 	query := `
 		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.payload, j.schedule_type, js.cron_expr, js.timezone, j.concurrency_key,
 		       j.priority, j.max_retries, j.timeout_seconds, j.retry_backoff_base_seconds,
@@ -513,18 +524,24 @@ func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool
 			query += " AND j.paused_at IS NULL"
 		}
 	}
+	if filter.Cursor != nil {
+		args = append(args, filter.Cursor.CreatedAt, filter.Cursor.ID)
+		createdAtArg := len(args) - 1
+		idArg := len(args)
+		query += fmt.Sprintf(" AND (j.created_at < $%d OR (j.created_at = $%d AND j.id < $%d))", createdAtArg, createdAtArg, idArg)
+	}
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 100
 	}
-	query += fmt.Sprintf(" ORDER BY j.created_at DESC LIMIT %d", limit+1)
+	query += fmt.Sprintf(" ORDER BY j.created_at DESC, j.id DESC LIMIT %d", limit+1)
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("query jobs: %w", err)
+		return nil, false, nil, fmt.Errorf("query jobs: %w", err)
 	}
 	defer rows.Close()
 
@@ -538,11 +555,11 @@ func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool
 		var pausedAt sql.NullTime
 		var disabledAt sql.NullTime
 		if err := rows.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &payloadBytes, &job.ScheduleType, &cronExpr, &timezone, &concurrencyKey, &job.Priority, &job.MaxRetries, &job.TimeoutSeconds, &job.RetryBackoffBaseSeconds, &pausedAt, &disabledAt, &job.CreatedAt, &job.UpdatedAt); err != nil {
-			return nil, false, fmt.Errorf("scan job: %w", err)
+			return nil, false, nil, fmt.Errorf("scan job: %w", err)
 		}
 		if len(payloadBytes) > 0 {
 			if err := json.Unmarshal(payloadBytes, &job.Payload); err != nil {
-				return nil, false, fmt.Errorf("unmarshal job payload: %w", err)
+				return nil, false, nil, fmt.Errorf("unmarshal job payload: %w", err)
 			}
 		}
 		if job.Payload == nil {
@@ -572,15 +589,19 @@ func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("rows error: %w", err)
+		return nil, false, nil, fmt.Errorf("rows error: %w", err)
 	}
 
 	hasMore := len(jobs) > limit
 	if hasMore {
 		jobs = jobs[:limit]
 	}
+	var next *PageBoundary
+	if hasMore && len(jobs) > 0 {
+		next = &PageBoundary{CreatedAt: jobs[len(jobs)-1].CreatedAt, ID: jobs[len(jobs)-1].ID}
+	}
 
-	return jobs, hasMore, nil
+	return jobs, hasMore, next, nil
 }
 
 func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
@@ -706,6 +727,68 @@ func (s *Store) UpdateJob(ctx context.Context, jobID string, input UpdateJobInpu
 	`, jobID, name, queue, string(payloadJSON), priority, maxRetries, timeoutSeconds, retryBackoffBaseSeconds, concurrencyKey, now); err != nil {
 		return Job{}, fmt.Errorf("update job: %w", err)
 	}
+	if input.ScheduleType != nil {
+		switch *input.ScheduleType {
+		case "delayed":
+			if current.ScheduleType != "delayed" || input.RunAt == nil {
+				return Job{}, ErrConflict
+			}
+			result, err := tx.ExecContext(ctx, `
+				UPDATE runs
+				SET scheduled_at = $2,
+				    available_at = $2,
+				    updated_at = $3
+				WHERE job_id = $1
+				  AND status = 'PENDING'
+			`, jobID, input.RunAt.UTC(), now)
+			if err != nil {
+				return Job{}, fmt.Errorf("update delayed run schedule: %w", err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil || affected == 0 {
+				return Job{}, ErrConflict
+			}
+		case "cron":
+			if current.ScheduleType != "cron" {
+				return Job{}, ErrConflict
+			}
+			cronExpr := ""
+			if current.CronExpr != nil {
+				cronExpr = *current.CronExpr
+			}
+			if input.CronExpr != nil {
+				cronExpr = strings.TrimSpace(*input.CronExpr)
+			}
+			timezone := "UTC"
+			if current.Timezone != nil && strings.TrimSpace(*current.Timezone) != "" {
+				timezone = strings.TrimSpace(*current.Timezone)
+			}
+			if input.Timezone != nil {
+				timezone = strings.TrimSpace(*input.Timezone)
+			}
+			nextRunAt, err := computeNextRun(cronExpr, timezone, now)
+			if err != nil {
+				return Job{}, err
+			}
+			result, err := tx.ExecContext(ctx, `
+				UPDATE job_schedules
+				SET cron_expr = $2,
+				    timezone = $3,
+				    next_run_at = $4,
+				    updated_at = $5
+				WHERE job_id = $1
+			`, jobID, cronExpr, timezone, nextRunAt, now)
+			if err != nil {
+				return Job{}, fmt.Errorf("update cron schedule: %w", err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil || affected == 0 {
+				return Job{}, ErrConflict
+			}
+		default:
+			return Job{}, ErrConflict
+		}
+	}
 	if err := insertAuditEvent(ctx, tx, now, audit); err != nil {
 		return Job{}, fmt.Errorf("insert update audit event: %w", err)
 	}
@@ -716,16 +799,17 @@ func (s *Store) UpdateJob(ctx context.Context, jobID string, input UpdateJobInpu
 }
 
 func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
-	runs, _, err := s.ListRunsPage(ctx, filter)
+	runs, _, _, err := s.ListRunsPage(ctx, filter)
 	return runs, err
 }
 
-func (s *Store) ListRunsPage(ctx context.Context, filter RunFilter) ([]Run, bool, error) {
+func (s *Store) ListRunsPage(ctx context.Context, filter RunFilter) ([]Run, bool, *PageBoundary, error) {
 	query := `
 		SELECT r.id, r.job_id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, j.disabled_at IS NOT NULL,
 		       r.status, r.attempt, r.scheduled_at, r.available_at, r.started_at,
 		       r.completed_at, r.worker_id, r.lease_token, r.lease_expires_at, r.last_heartbeat_at,
-		       r.dead_lettered_at, r.dead_letter_reason, r.result, r.error_code, r.error_message
+		       r.dead_lettered_at, r.dead_letter_reason, r.result, r.error_code, r.error_message,
+		       r.created_at
 		FROM runs r
 		JOIN jobs j ON j.id = r.job_id
 		WHERE 1=1
@@ -769,39 +853,53 @@ func (s *Store) ListRunsPage(ctx context.Context, filter RunFilter) ([]Run, bool
 			query += " AND r.dead_lettered_at IS NULL"
 		}
 	}
+	if filter.Cursor != nil {
+		args = append(args, filter.Cursor.CreatedAt, filter.Cursor.ID)
+		createdAtArg := len(args) - 1
+		idArg := len(args)
+		query += fmt.Sprintf(" AND (r.created_at < $%d OR (r.created_at = $%d AND r.id < $%d))", createdAtArg, createdAtArg, idArg)
+	}
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 100
 	}
-	query += fmt.Sprintf(" ORDER BY r.created_at DESC LIMIT %d", limit+1)
+	query += fmt.Sprintf(" ORDER BY r.created_at DESC, r.id DESC LIMIT %d", limit+1)
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("query runs: %w", err)
+		return nil, false, nil, fmt.Errorf("query runs: %w", err)
 	}
 	defer rows.Close()
 
 	runs := make([]Run, 0)
+	runCreatedAts := make([]time.Time, 0)
 	for rows.Next() {
-		run, err := scanRun(rows)
+		var createdAt time.Time
+		run, err := scanRunWithCreatedAt(rows, &createdAt)
 		if err != nil {
-			return nil, false, err
+			return nil, false, nil, err
 		}
 		runs = append(runs, run)
+		runCreatedAts = append(runCreatedAts, createdAt)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("runs rows error: %w", err)
+		return nil, false, nil, fmt.Errorf("runs rows error: %w", err)
 	}
 
 	hasMore := len(runs) > limit
 	if hasMore {
 		runs = runs[:limit]
+		runCreatedAts = runCreatedAts[:limit]
+	}
+	var next *PageBoundary
+	if hasMore && len(runs) > 0 {
+		next = &PageBoundary{CreatedAt: runCreatedAts[len(runCreatedAts)-1], ID: runs[len(runs)-1].ID}
 	}
 
-	return runs, hasMore, nil
+	return runs, hasMore, next, nil
 }
 
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, []RunEvent, error) {
@@ -2787,6 +2885,10 @@ type runScanner interface {
 }
 
 func scanRun(scanner runScanner) (Run, error) {
+	return scanRunWithCreatedAt(scanner, nil)
+}
+
+func scanRunWithCreatedAt(scanner runScanner, createdAt *time.Time) (Run, error) {
 	var run Run
 	var jobDisabled bool
 	var startedAt sql.NullTime
@@ -2800,7 +2902,7 @@ func scanRun(scanner runScanner) (Run, error) {
 	var errorCode sql.NullString
 	var errorMessage sql.NullString
 
-	if err := scanner.Scan(
+	dest := []any{
 		&run.ID,
 		&run.JobID,
 		&run.JobName,
@@ -2824,7 +2926,12 @@ func scanRun(scanner runScanner) (Run, error) {
 		&resultBytes,
 		&errorCode,
 		&errorMessage,
-	); err != nil {
+	}
+	if createdAt != nil {
+		dest = append(dest, createdAt)
+	}
+
+	if err := scanner.Scan(dest...); err != nil {
 		return Run{}, err
 	}
 	run.JobDisabled = jobDisabled
