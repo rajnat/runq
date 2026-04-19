@@ -258,7 +258,8 @@ func TestListJobsSupportsLimitAndOffset(t *testing.T) {
 	}
 
 	var jobsResp struct {
-		Jobs []store.Job `json:"jobs"`
+		Jobs       []store.Job   `json:"jobs"`
+		Pagination PaginationMeta `json:"pagination"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&limit=2&offset=1", nil, &jobsResp)
 	if status != http.StatusOK {
@@ -269,6 +270,12 @@ func TestListJobsSupportsLimitAndOffset(t *testing.T) {
 	}
 	if jobsResp.Jobs[0].ID != createdJobIDs[1] || jobsResp.Jobs[1].ID != createdJobIDs[2] {
 		t.Fatalf("unexpected paginated jobs: %+v expected ids=%+v", jobsResp.Jobs, createdJobIDs)
+	}
+	if jobsResp.Pagination.Limit != 2 || jobsResp.Pagination.Offset != 1 || jobsResp.Pagination.Returned != 2 || jobsResp.Pagination.HasMore {
+		t.Fatalf("unexpected jobs pagination metadata: %+v", jobsResp.Pagination)
+	}
+	if jobsResp.Pagination.NextOffset != nil {
+		t.Fatalf("expected no next_offset, got %+v", jobsResp.Pagination)
 	}
 }
 
@@ -298,7 +305,8 @@ func TestListRunsSupportsLimitAndOffset(t *testing.T) {
 	}
 
 	var runsResp struct {
-		Runs []store.Run `json:"runs"`
+		Runs       []store.Run   `json:"runs"`
+		Pagination PaginationMeta `json:"pagination"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs?tenant_id=tenant-api&limit=2&offset=1", nil, &runsResp)
 	if status != http.StatusOK {
@@ -309,6 +317,12 @@ func TestListRunsSupportsLimitAndOffset(t *testing.T) {
 	}
 	if runsResp.Runs[0].ID != createdRunIDs[1] || runsResp.Runs[1].ID != createdRunIDs[2] {
 		t.Fatalf("unexpected paginated runs: %+v expected ids=%+v", runsResp.Runs, createdRunIDs)
+	}
+	if runsResp.Pagination.Limit != 2 || runsResp.Pagination.Offset != 1 || runsResp.Pagination.Returned != 2 || runsResp.Pagination.HasMore {
+		t.Fatalf("unexpected runs pagination metadata: %+v", runsResp.Pagination)
+	}
+	if runsResp.Pagination.NextOffset != nil {
+		t.Fatalf("expected no next_offset, got %+v", runsResp.Pagination)
 	}
 }
 

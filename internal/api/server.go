@@ -247,7 +247,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs, err := s.store.ListJobs(ctx, store.JobFilter{
+	jobs, hasMore, err := s.store.ListJobsPage(ctx, store.JobFilter{
 		TenantID: filterTenantID,
 		Queue:    r.URL.Query().Get("queue"),
 		Kind:     r.URL.Query().Get("kind"),
@@ -262,7 +262,10 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+	writeJSON(w, http.StatusOK, ListJobsResponse{
+		Jobs: jobs,
+		Pagination: paginationMeta(limit, offset, len(jobs), hasMore),
+	})
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -813,7 +816,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runs, err := s.store.ListRuns(ctx, store.RunFilter{
+	runs, hasMore, err := s.store.ListRunsPage(ctx, store.RunFilter{
 		TenantID:     filterTenantID,
 		Statuses:     strings.Split(r.URL.Query().Get("status"), ","),
 		Queue:        r.URL.Query().Get("queue"),
@@ -830,7 +833,10 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+	writeJSON(w, http.StatusOK, ListRunsResponse{
+		Runs: runs,
+		Pagination: paginationMeta(limit, offset, len(runs), hasMore),
+	})
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {

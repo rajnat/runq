@@ -434,17 +434,22 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 		return CreateJobResult{}, err
 	}
 
-	scheduledAt := now
 	if input.RunAt != nil {
-		scheduledAt = input.RunAt.UTC()
+		scheduledAt := input.RunAt.UTC()
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO runs (
+				id, job_id, status, attempt, scheduled_at, available_at, created_at, updated_at
+			)
+			VALUES ($1, $2, 'PENDING', 0, $3, $3, NOW(), NOW())
+		`, runID, jobID, scheduledAt)
+	} else {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO runs (
+				id, job_id, status, attempt, scheduled_at, available_at, created_at, updated_at
+			)
+			VALUES ($1, $2, 'PENDING', 0, NOW(), NOW(), NOW(), NOW())
+		`, runID, jobID)
 	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO runs (
-			id, job_id, status, attempt, scheduled_at, available_at, created_at, updated_at
-		)
-		VALUES ($1, $2, 'PENDING', 0, $3, $3, NOW(), NOW())
-	`, runID, jobID, scheduledAt)
 	if err != nil {
 		return CreateJobResult{}, fmt.Errorf("insert run: %w", err)
 	}
@@ -468,6 +473,11 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 }
 
 func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
+	jobs, _, err := s.ListJobsPage(ctx, filter)
+	return jobs, err
+}
+
+func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool, error) {
 	query := `
 		SELECT j.id, j.name, j.tenant_id, j.queue, j.kind, j.payload, j.schedule_type, js.cron_expr, js.timezone, j.concurrency_key,
 		       j.priority, j.max_retries, j.timeout_seconds, j.retry_backoff_base_seconds,
@@ -507,14 +517,14 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	query += fmt.Sprintf(" ORDER BY j.created_at DESC LIMIT %d", limit)
+	query += fmt.Sprintf(" ORDER BY j.created_at DESC LIMIT %d", limit+1)
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query jobs: %w", err)
+		return nil, false, fmt.Errorf("query jobs: %w", err)
 	}
 	defer rows.Close()
 
@@ -528,11 +538,11 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 		var pausedAt sql.NullTime
 		var disabledAt sql.NullTime
 		if err := rows.Scan(&job.ID, &job.Name, &job.TenantID, &job.Queue, &job.Kind, &payloadBytes, &job.ScheduleType, &cronExpr, &timezone, &concurrencyKey, &job.Priority, &job.MaxRetries, &job.TimeoutSeconds, &job.RetryBackoffBaseSeconds, &pausedAt, &disabledAt, &job.CreatedAt, &job.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan job: %w", err)
+			return nil, false, fmt.Errorf("scan job: %w", err)
 		}
 		if len(payloadBytes) > 0 {
 			if err := json.Unmarshal(payloadBytes, &job.Payload); err != nil {
-				return nil, fmt.Errorf("unmarshal job payload: %w", err)
+				return nil, false, fmt.Errorf("unmarshal job payload: %w", err)
 			}
 		}
 		if job.Payload == nil {
@@ -562,10 +572,15 @@ func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
+		return nil, false, fmt.Errorf("rows error: %w", err)
 	}
 
-	return jobs, nil
+	hasMore := len(jobs) > limit
+	if hasMore {
+		jobs = jobs[:limit]
+	}
+
+	return jobs, hasMore, nil
 }
 
 func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
@@ -701,6 +716,11 @@ func (s *Store) UpdateJob(ctx context.Context, jobID string, input UpdateJobInpu
 }
 
 func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
+	runs, _, err := s.ListRunsPage(ctx, filter)
+	return runs, err
+}
+
+func (s *Store) ListRunsPage(ctx context.Context, filter RunFilter) ([]Run, bool, error) {
 	query := `
 		SELECT r.id, r.job_id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, j.disabled_at IS NOT NULL,
 		       r.status, r.attempt, r.scheduled_at, r.available_at, r.started_at,
@@ -753,14 +773,14 @@ func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	query += fmt.Sprintf(" ORDER BY r.created_at DESC LIMIT %d", limit)
+	query += fmt.Sprintf(" ORDER BY r.created_at DESC LIMIT %d", limit+1)
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query runs: %w", err)
+		return nil, false, fmt.Errorf("query runs: %w", err)
 	}
 	defer rows.Close()
 
@@ -768,15 +788,20 @@ func (s *Store) ListRuns(ctx context.Context, filter RunFilter) ([]Run, error) {
 	for rows.Next() {
 		run, err := scanRun(rows)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		runs = append(runs, run)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("runs rows error: %w", err)
+		return nil, false, fmt.Errorf("runs rows error: %w", err)
 	}
 
-	return runs, nil
+	hasMore := len(runs) > limit
+	if hasMore {
+		runs = runs[:limit]
+	}
+
+	return runs, hasMore, nil
 }
 
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, []RunEvent, error) {

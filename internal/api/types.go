@@ -116,6 +116,24 @@ type GetRunResponse struct {
 	Events []store.RunEvent `json:"events"`
 }
 
+type PaginationMeta struct {
+	Limit      int  `json:"limit"`
+	Offset     int  `json:"offset"`
+	Returned   int  `json:"returned"`
+	HasMore    bool `json:"has_more"`
+	NextOffset *int `json:"next_offset,omitempty"`
+}
+
+type ListJobsResponse struct {
+	Jobs       []store.Job    `json:"jobs"`
+	Pagination PaginationMeta `json:"pagination"`
+}
+
+type ListRunsResponse struct {
+	Runs       []store.Run    `json:"runs"`
+	Pagination PaginationMeta `json:"pagination"`
+}
+
 type RequeueRunResponse struct {
 	RunID   string `json:"run_id"`
 	Status  string `json:"status"`
@@ -385,4 +403,18 @@ func parseOptionalInt(value string, minimum int) (int, error) {
 		return 0, errors.New("invalid integer")
 	}
 	return parsed, nil
+}
+
+func paginationMeta(limit, offset, returned int, hasMore bool) PaginationMeta {
+	meta := PaginationMeta{
+		Limit:    limit,
+		Offset:   offset,
+		Returned: returned,
+		HasMore:  hasMore,
+	}
+	if hasMore {
+		next := offset + returned
+		meta.NextOffset = &next
+	}
+	return meta
 }
