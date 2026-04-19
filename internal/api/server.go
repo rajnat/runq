@@ -733,29 +733,45 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	limit := 100
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		var parsed int
-		if _, err := fmt.Sscanf(raw, "%d", &parsed); err != nil || parsed <= 0 {
-			writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
-			return
-		}
-		limit = parsed
+	limit, err := parseOptionalInt(r.URL.Query().Get("limit"), 1)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
+		return
+	}
+	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
+		return
+	}
+	cursor, err := decodePageCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
 	}
 
-	events, err := s.store.ListAuditEvents(ctx, store.AuditEventFilter{
+	events, hasMore, nextBoundary, err := s.store.ListAuditEventsPage(ctx, store.AuditEventFilter{
 		TenantID:     strings.TrimSpace(r.URL.Query().Get("tenant_id")),
 		Action:       strings.TrimSpace(r.URL.Query().Get("action")),
 		ResourceType: strings.TrimSpace(r.URL.Query().Get("resource_type")),
 		Limit:        limit,
+		Offset:       offset,
+		Cursor:       cursor,
 	})
 	if err != nil {
 		s.logger.Printf("list audit events failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list audit events")
 		return
 	}
+	nextCursor, err := encodePageCursor(nextBoundary)
+	if err != nil {
+		s.logger.Printf("encode audit cursor failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build audit pagination")
+		return
+	}
+	pagination := paginationMeta(limit, offset, len(events), hasMore)
+	pagination.NextCursor = nextCursor
 
-	writeJSON(w, http.StatusOK, ListAuditEventsResponse{Events: events})
+	writeJSON(w, http.StatusOK, ListAuditEventsResponse{Events: events, Pagination: pagination})
 }
 
 func (s *Server) handleUpsertTenantQuota(w http.ResponseWriter, r *http.Request) {
@@ -1036,14 +1052,38 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	workers, err := s.store.ListWorkers(ctx)
+	limit, err := parseOptionalInt(r.URL.Query().Get("limit"), 1)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
+		return
+	}
+	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
+		return
+	}
+	cursor, err := decodePageCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+
+	workers, hasMore, nextBoundary, err := s.store.ListWorkersPage(ctx, store.WorkerFilter{Limit: limit, Offset: offset, Cursor: cursor})
 	if err != nil {
 		s.logger.Printf("list workers failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list workers")
 		return
 	}
+	nextCursor, err := encodePageCursor(nextBoundary)
+	if err != nil {
+		s.logger.Printf("encode workers cursor failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to build workers pagination")
+		return
+	}
+	pagination := paginationMeta(limit, offset, len(workers), hasMore)
+	pagination.NextCursor = nextCursor
 
-	writeJSON(w, http.StatusOK, map[string]any{"workers": workers})
+	writeJSON(w, http.StatusOK, ListWorkersResponse{Workers: workers, Pagination: pagination})
 }
 
 func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {

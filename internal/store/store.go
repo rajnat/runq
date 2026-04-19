@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,6 +187,14 @@ type AuditEventFilter struct {
 	Action       string
 	ResourceType string
 	Limit        int
+	Offset       int
+	Cursor       *PageBoundary
+}
+
+type WorkerFilter struct {
+	Limit  int
+	Offset int
+	Cursor *PageBoundary
 }
 
 type eligibleWorker struct {
@@ -1416,31 +1425,65 @@ func (s *Store) RegisterWorker(ctx context.Context, input RegisterWorkerInput) (
 }
 
 func (s *Store) ListWorkers(ctx context.Context) ([]Worker, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, status, max_concurrency, last_heartbeat_at
+	workers, _, _, err := s.ListWorkersPage(ctx, WorkerFilter{})
+	return workers, err
+}
+
+func (s *Store) ListWorkersPage(ctx context.Context, filter WorkerFilter) ([]Worker, bool, *PageBoundary, error) {
+	query := `
+		SELECT id, name, status, max_concurrency, last_heartbeat_at, started_at
 		FROM workers
-		ORDER BY started_at DESC
-		LIMIT 100
-	`)
+		WHERE 1=1
+	`
+	args := make([]any, 0, 2)
+	if filter.Cursor != nil {
+		args = append(args, filter.Cursor.CreatedAt, filter.Cursor.ID)
+		createdAtArg := len(args) - 1
+		idArg := len(args)
+		query += fmt.Sprintf(" AND (started_at < $%d OR (started_at = $%d AND id < $%d))", createdAtArg, createdAtArg, idArg)
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	query += fmt.Sprintf(" ORDER BY started_at DESC, id DESC LIMIT %d", limit+1)
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query workers: %w", err)
+		return nil, false, nil, fmt.Errorf("query workers: %w", err)
 	}
 	defer rows.Close()
 
-	var workers []Worker
+	workers := make([]Worker, 0)
+	startedAts := make([]time.Time, 0)
 	for rows.Next() {
 		var worker Worker
-		if err := rows.Scan(&worker.ID, &worker.Name, &worker.Status, &worker.MaxConcurrency, &worker.LastHeartbeatAt); err != nil {
-			return nil, fmt.Errorf("scan worker: %w", err)
+		var startedAt time.Time
+		if err := rows.Scan(&worker.ID, &worker.Name, &worker.Status, &worker.MaxConcurrency, &worker.LastHeartbeatAt, &startedAt); err != nil {
+			return nil, false, nil, fmt.Errorf("scan worker: %w", err)
 		}
 		workers = append(workers, worker)
+		startedAts = append(startedAts, startedAt)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("workers rows error: %w", err)
+		return nil, false, nil, fmt.Errorf("workers rows error: %w", err)
 	}
 
-	return workers, nil
+	hasMore := len(workers) > limit
+	if hasMore {
+		workers = workers[:limit]
+		startedAts = startedAts[:limit]
+	}
+	var next *PageBoundary
+	if hasMore && len(workers) > 0 {
+		next = &PageBoundary{CreatedAt: startedAts[len(startedAts)-1], ID: workers[len(workers)-1].ID}
+	}
+
+	return workers, hasMore, next, nil
 }
 
 func (s *Store) GetWorker(ctx context.Context, workerID string) (Worker, error) {
@@ -1534,6 +1577,11 @@ func (s *Store) ListTenantQuotas(ctx context.Context) ([]TenantQuota, error) {
 }
 
 func (s *Store) ListAuditEvents(ctx context.Context, filter AuditEventFilter) ([]AuditEvent, error) {
+	events, _, _, err := s.ListAuditEventsPage(ctx, filter)
+	return events, err
+}
+
+func (s *Store) ListAuditEventsPage(ctx context.Context, filter AuditEventFilter) ([]AuditEvent, bool, *PageBoundary, error) {
 	query := `
 		SELECT id, event_time, actor_role, actor_id, action, resource_type, resource_id, tenant_id, payload
 		FROM audit_events
@@ -1552,28 +1600,42 @@ func (s *Store) ListAuditEvents(ctx context.Context, filter AuditEventFilter) ([
 		args = append(args, filter.ResourceType)
 		query += fmt.Sprintf(" AND resource_type = $%d", len(args))
 	}
+	if filter.Cursor != nil {
+		id, err := strconv.ParseInt(filter.Cursor.ID, 10, 64)
+		if err != nil {
+			return nil, false, nil, fmt.Errorf("parse audit cursor id: %w", err)
+		}
+		args = append(args, filter.Cursor.CreatedAt, id)
+		eventTimeArg := len(args) - 1
+		idArg := len(args)
+		query += fmt.Sprintf(" AND (event_time < $%d OR (event_time = $%d AND id < $%d))", eventTimeArg, eventTimeArg, idArg)
+	}
 
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	args = append(args, limit)
-	query += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
+	args = append(args, limit+1)
+	query += fmt.Sprintf(" ORDER BY event_time DESC, id DESC LIMIT $%d", len(args))
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query audit events: %w", err)
+		return nil, false, nil, fmt.Errorf("query audit events: %w", err)
 	}
 	defer rows.Close()
 
 	events := make([]AuditEvent, 0)
+	eventTimes := make([]time.Time, 0)
 	for rows.Next() {
 		var event AuditEvent
 		var actorID sql.NullString
 		var tenantID sql.NullString
 		var payloadBytes []byte
 		if err := rows.Scan(&event.ID, &event.EventTime, &event.ActorRole, &actorID, &event.Action, &event.ResourceType, &event.ResourceID, &tenantID, &payloadBytes); err != nil {
-			return nil, fmt.Errorf("scan audit event: %w", err)
+			return nil, false, nil, fmt.Errorf("scan audit event: %w", err)
 		}
 		if actorID.Valid {
 			value := actorID.String
@@ -1585,19 +1647,30 @@ func (s *Store) ListAuditEvents(ctx context.Context, filter AuditEventFilter) ([
 		}
 		if len(payloadBytes) > 0 {
 			if err := json.Unmarshal(payloadBytes, &event.Payload); err != nil {
-				return nil, fmt.Errorf("unmarshal audit event payload: %w", err)
+				return nil, false, nil, fmt.Errorf("unmarshal audit event payload: %w", err)
 			}
 		}
 		if event.Payload == nil {
 			event.Payload = map[string]any{}
 		}
 		events = append(events, event)
+		eventTimes = append(eventTimes, event.EventTime)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("audit events rows error: %w", err)
+		return nil, false, nil, fmt.Errorf("audit events rows error: %w", err)
 	}
 
-	return events, nil
+	hasMore := len(events) > limit
+	if hasMore {
+		events = events[:limit]
+		eventTimes = eventTimes[:limit]
+	}
+	var next *PageBoundary
+	if hasMore && len(events) > 0 {
+		next = &PageBoundary{CreatedAt: eventTimes[len(eventTimes)-1], ID: strconv.FormatInt(events[len(events)-1].ID, 10)}
+	}
+
+	return events, hasMore, next, nil
 }
 
 func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDuration time.Duration, tenantMaxInflight int) ([]WorkerAssignment, ClaimSummary, error) {

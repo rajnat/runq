@@ -138,6 +138,11 @@ type ListRunsResponse struct {
 	Pagination PaginationMeta `json:"pagination"`
 }
 
+type ListWorkersResponse struct {
+	Workers    []store.Worker `json:"workers"`
+	Pagination PaginationMeta `json:"pagination"`
+}
+
 type RequeueRunResponse struct {
 	RunID   string `json:"run_id"`
 	Status  string `json:"status"`
@@ -178,7 +183,8 @@ type TenantQuotaResponse struct {
 }
 
 type ListAuditEventsResponse struct {
-	Events []store.AuditEvent `json:"events"`
+	Events     []store.AuditEvent `json:"events"`
+	Pagination PaginationMeta     `json:"pagination"`
 }
 
 func (r CreateJobRequest) Validate() error {

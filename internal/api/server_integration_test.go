@@ -540,6 +540,103 @@ func TestListRunsSupportsCursorPagination(t *testing.T) {
 	}
 }
 
+func TestListWorkersSupportsCursorPagination(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	createdWorkerIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		var resp RegisterWorkerResponse
+		status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+			"name":            "cursor-worker-" + string(rune('a'+i)),
+			"queues":          []string{"default"},
+			"capabilities":    map[string]any{"http": true},
+			"max_concurrency": 1,
+		}, &resp)
+		if status != http.StatusCreated {
+			t.Fatalf("expected 201 creating worker %d, got %d", i, status)
+		}
+		createdWorkerIDs = append([]string{resp.WorkerID}, createdWorkerIDs...)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var firstPage struct {
+		Workers    []store.Worker `json:"workers"`
+		Pagination PaginationMeta `json:"pagination"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?limit=2", nil, &firstPage)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing first workers page, got %d", status)
+	}
+	if len(firstPage.Workers) != 2 || !firstPage.Pagination.HasMore || firstPage.Pagination.NextCursor == nil {
+		t.Fatalf("expected first workers page with next cursor, got %+v", firstPage)
+	}
+	if firstPage.Workers[0].ID != createdWorkerIDs[0] || firstPage.Workers[1].ID != createdWorkerIDs[1] {
+		t.Fatalf("unexpected first workers page: %+v expected ids=%+v", firstPage.Workers, createdWorkerIDs)
+	}
+
+	var secondPage struct {
+		Workers    []store.Worker `json:"workers"`
+		Pagination PaginationMeta `json:"pagination"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?limit=2&cursor="+*firstPage.Pagination.NextCursor, nil, &secondPage)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing second workers page, got %d", status)
+	}
+	if len(secondPage.Workers) != 1 || secondPage.Workers[0].ID != createdWorkerIDs[2] {
+		t.Fatalf("unexpected second workers page: %+v expected ids=%+v", secondPage.Workers, createdWorkerIDs)
+	}
+	if secondPage.Pagination.HasMore || secondPage.Pagination.NextCursor != nil {
+		t.Fatalf("expected final workers page without next cursor, got %+v", secondPage.Pagination)
+	}
+}
+
+func TestListAuditEventsSupportsCursorPagination(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	for i := 0; i < 3; i++ {
+		status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPut, httpServer.URL+"/v1/tenants/tenant-cursor/quota", map[string]any{
+			"max_inflight":     i + 1,
+			"max_pending_runs": i + 2,
+			"max_active_jobs":  i + 3,
+		}, &TenantQuotaResponse{})
+		if status != http.StatusOK {
+			t.Fatalf("expected 200 upserting quota %d, got %d", i, status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	firstPage := ListAuditEventsResponse{}
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/audit/events?action=TENANT_QUOTA_UPSERT&limit=2", nil, &firstPage)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing first audit page, got %d", status)
+	}
+	if len(firstPage.Events) != 2 || !firstPage.Pagination.HasMore || firstPage.Pagination.NextCursor == nil {
+		t.Fatalf("expected first audit page with next cursor, got %+v", firstPage)
+	}
+
+	secondPage := ListAuditEventsResponse{}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/audit/events?action=TENANT_QUOTA_UPSERT&limit=2&cursor="+*firstPage.Pagination.NextCursor, nil, &secondPage)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing second audit page, got %d", status)
+	}
+	if len(secondPage.Events) != 1 {
+		t.Fatalf("expected final audit page with one event, got %+v", secondPage.Events)
+	}
+	if secondPage.Pagination.HasMore || secondPage.Pagination.NextCursor != nil {
+		t.Fatalf("expected final audit page without next cursor, got %+v", secondPage.Pagination)
+	}
+}
+
 func TestDisableAndEnableJobEndpoints(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)
