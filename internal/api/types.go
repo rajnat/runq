@@ -143,6 +143,25 @@ type ListWorkersResponse struct {
 	Pagination PaginationMeta `json:"pagination"`
 }
 
+type BulkRunOperationRequest struct {
+	RunIDs       []string `json:"run_ids,omitempty"`
+	TenantID     string   `json:"tenant_id,omitempty"`
+	JobID        string   `json:"job_id,omitempty"`
+	Statuses     []string `json:"status,omitempty"`
+	DeadLettered *bool    `json:"dead_lettered,omitempty"`
+}
+
+type BulkRunOperationItem struct {
+	FromRun string `json:"from_run"`
+	RunID   string `json:"run_id,omitempty"`
+	Status  string `json:"status"`
+}
+
+type BulkRunOperationResponse struct {
+	Count   int                    `json:"count"`
+	Results []BulkRunOperationItem `json:"results"`
+}
+
 type RequeueRunResponse struct {
 	RunID   string `json:"run_id"`
 	Status  string `json:"status"`
@@ -289,6 +308,18 @@ func (r UpdateJobRequest) Validate() error {
 	}
 	if r.RetryBackoffBaseSeconds != nil && *r.RetryBackoffBaseSeconds <= 0 {
 		return errors.New("retry_backoff_base_seconds must be greater than zero")
+	}
+	return nil
+}
+
+func (r BulkRunOperationRequest) Validate() error {
+	if len(r.RunIDs) == 0 && strings.TrimSpace(r.JobID) == "" && len(r.Statuses) == 0 && r.DeadLettered == nil {
+		return errors.New("at least one selector is required")
+	}
+	for _, id := range r.RunIDs {
+		if strings.TrimSpace(id) == "" {
+			return errors.New("run_ids must not contain blank values")
+		}
 	}
 	return nil
 }

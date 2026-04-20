@@ -308,6 +308,76 @@ type CancelJobResult struct {
 	Disabled     bool
 }
 
+func (s *Store) CancelRuns(ctx context.Context, runIDs []string, reason string, audit *AuditEventInput) ([]string, error) {
+	if len(runIDs) == 0 {
+		return []string{}, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin cancel runs tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'CANCELED',
+		    completed_at = $2,
+		    updated_at = $2,
+		    cancel_requested_at = $2
+		WHERE id = ANY($1)
+		  AND status IN ('PENDING', 'RUNNING')
+	`, pq.Array(runIDs), now)
+	if err != nil {
+		return nil, fmt.Errorf("cancel runs: %w", err)
+	}
+	_, err = result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("cancel runs rows affected: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id
+		FROM runs
+		WHERE id = ANY($1)
+		  AND cancel_requested_at = $2
+		ORDER BY id ASC
+	`, pq.Array(runIDs), now)
+	if err != nil {
+		return nil, fmt.Errorf("query canceled runs: %w", err)
+	}
+	defer rows.Close()
+	canceled := make([]string, 0)
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, fmt.Errorf("scan canceled run: %w", err)
+		}
+		canceled = append(canceled, runID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("canceled runs rows error: %w", err)
+	}
+	if len(canceled) > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO run_events (run_id, event_type, actor_type, payload)
+			SELECT id, 'RUN_CANCELED', 'api', $2::jsonb
+			FROM runs
+			WHERE id = ANY($1)
+			  AND cancel_requested_at = $3
+		`, pq.Array(canceled), fmt.Sprintf(`{"reason":%q}`, reason), now); err != nil {
+			return nil, fmt.Errorf("insert cancel run events: %w", err)
+		}
+	}
+	if err := insertAuditEvent(ctx, tx, now, audit); err != nil {
+		return nil, fmt.Errorf("insert cancel runs audit event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit cancel runs tx: %w", err)
+	}
+	return canceled, nil
+}
+
 type JobLifecycleResult struct {
 	JobID  string
 	Status string

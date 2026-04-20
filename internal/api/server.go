@@ -99,6 +99,9 @@ func (s *Server) routes() {
 	s.handle("GET /v1/audit/events", s.handleListAuditEvents)
 	s.handle("GET /v1/runs", s.handleListRuns)
 	s.handle("GET /v1/runs/{runID}", s.handleGetRun)
+	s.handle("POST /v1/runs/requeue", s.handleBulkRequeueRuns)
+	s.handle("POST /v1/runs/redrive", s.handleBulkRedriveRuns)
+	s.handle("POST /v1/runs/cancel", s.handleBulkCancelRuns)
 	s.handle("POST /v1/runs/{runID}/requeue", s.handleRequeueRun)
 	s.handle("POST /v1/runs/{runID}/redrive", s.handleRedriveRun)
 	s.handle("POST /v1/jobs", s.handleCreateJob)
@@ -923,6 +926,198 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		Run:    run,
 		Events: events,
 	})
+}
+
+func (s *Server) selectRunsForBulkOperation(ctx context.Context, principal principal, req BulkRunOperationRequest) ([]store.Run, error) {
+	if len(req.RunIDs) > 0 {
+		runs := make([]store.Run, 0, len(req.RunIDs))
+		for _, runID := range req.RunIDs {
+			run, _, err := s.store.GetRun(ctx, strings.TrimSpace(runID))
+			if err != nil {
+				return nil, err
+			}
+			if !canAccessTenant(principal, run.TenantID) {
+				return nil, store.ErrConflict
+			}
+			runs = append(runs, run)
+		}
+		return runs, nil
+	}
+
+	filterTenantID, allowed := authorizedTenantFilter(principal, req.TenantID)
+	if !allowed {
+		return nil, store.ErrConflict
+	}
+	runs, err := s.store.ListRuns(ctx, store.RunFilter{
+		TenantID:     filterTenantID,
+		Statuses:     req.Statuses,
+		JobID:        strings.TrimSpace(req.JobID),
+		DeadLettered: req.DeadLettered,
+		Limit:        200,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+func (s *Server) handleBulkRequeueRuns(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot requeue runs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var req BulkRunOperationRequest
+	if ok := decodeJSONBody(w, r, &req); !ok {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	runs, err := s.selectRunsForBulkOperation(ctx, principal, req)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load runs")
+		return
+	}
+	results := make([]BulkRunOperationItem, 0, len(runs))
+	for _, run := range runs {
+		newRunID, err := s.store.RequeueRun(ctx, run.ID, s.auditInput(principal, "RUN_REQUEUE", "run", run.ID, run.TenantID, map[string]any{"job_id": run.JobID, "bulk": true}))
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrQuotaExceeded) {
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to requeue runs")
+			return
+		}
+		results = append(results, BulkRunOperationItem{FromRun: run.ID, RunID: newRunID, Status: "accepted"})
+	}
+	writeJSON(w, http.StatusAccepted, BulkRunOperationResponse{Count: len(results), Results: results})
+}
+
+func (s *Server) handleBulkRedriveRuns(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot redrive runs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var req BulkRunOperationRequest
+	if ok := decodeJSONBody(w, r, &req); !ok {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	runs, err := s.selectRunsForBulkOperation(ctx, principal, req)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load runs")
+		return
+	}
+	results := make([]BulkRunOperationItem, 0, len(runs))
+	for _, run := range runs {
+		if run.DeadLetteredAt == nil {
+			continue
+		}
+		newRunID, err := s.store.RequeueRun(ctx, run.ID, s.auditInput(principal, "RUN_REDRIVE", "run", run.ID, run.TenantID, map[string]any{"job_id": run.JobID, "bulk": true}))
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrQuotaExceeded) {
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to redrive runs")
+			return
+		}
+		results = append(results, BulkRunOperationItem{FromRun: run.ID, RunID: newRunID, Status: "accepted"})
+	}
+	writeJSON(w, http.StatusAccepted, BulkRunOperationResponse{Count: len(results), Results: results})
+}
+
+func (s *Server) handleBulkCancelRuns(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot cancel runs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var req BulkRunOperationRequest
+	if ok := decodeJSONBody(w, r, &req); !ok {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	runs, err := s.selectRunsForBulkOperation(ctx, principal, req)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load runs")
+		return
+	}
+	canceled, err := s.store.CancelRuns(ctx, extractRunIDs(runs), "canceled via bulk api", s.auditInput(principal, "RUN_CANCEL", "run_batch", "bulk", tenantIDForRuns(runs), map[string]any{"count": len(runs)}))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to cancel runs")
+		return
+	}
+	results := make([]BulkRunOperationItem, 0, len(canceled))
+	for _, runID := range canceled {
+		results = append(results, BulkRunOperationItem{FromRun: runID, Status: "canceled"})
+	}
+	writeJSON(w, http.StatusOK, BulkRunOperationResponse{Count: len(results), Results: results})
+}
+
+func extractRunIDs(runs []store.Run) []string {
+	ids := make([]string, 0, len(runs))
+	for _, run := range runs {
+		ids = append(ids, run.ID)
+	}
+	return ids
+}
+
+func tenantIDForRuns(runs []store.Run) string {
+	if len(runs) == 0 {
+		return ""
+	}
+	return runs[0].TenantID
 }
 
 func (s *Server) handleRequeueRun(w http.ResponseWriter, r *http.Request) {

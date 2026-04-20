@@ -1470,6 +1470,200 @@ func TestDeadLetterRunCanBeListedAndRedriven(t *testing.T) {
 	}
 }
 
+func TestBulkRequeueRunsByID(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	failedRunIDs := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+			Name:         "api-bulk-requeue-" + string(rune('a'+i)),
+			TenantID:     "tenant-api",
+			Queue:        "default",
+			Kind:         "http",
+			Payload:      map[string]any{"url": "https://example.internal/task"},
+			ScheduleType: "once",
+		})
+		if err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		worker, err := jobStore.RegisterWorker(ctx, store.RegisterWorkerInput{
+			Name:           "api-bulk-requeue-worker-" + string(rune('a'+i)),
+			Queues:         []string{"default"},
+			Capabilities:   map[string]any{"http": true},
+			MaxConcurrency: 1,
+			Metadata:       map[string]any{"role": "api"},
+		})
+		if err != nil {
+			t.Fatalf("register worker: %v", err)
+		}
+		if _, err := jobStore.DB().ExecContext(ctx, `
+			UPDATE runs
+			SET status = 'RUNNING', worker_id = $2, lease_token = 1,
+			    lease_expires_at = NOW() + INTERVAL '30 seconds', started_at = NOW(), updated_at = NOW()
+			WHERE id = $1
+		`, *result.RunID, worker.WorkerID); err != nil {
+			t.Fatalf("mark run running: %v", err)
+		}
+		if err := jobStore.FailRun(ctx, store.FailRunInput{
+			WorkerID: worker.WorkerID, RunID: *result.RunID, LeaseToken: 1,
+			ErrorCode: "HTTP_500", ErrorMessage: "terminal failure", Retryable: false,
+		}); err != nil {
+			t.Fatalf("fail run: %v", err)
+		}
+		failedRunIDs = append(failedRunIDs, *result.RunID)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var resp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			FromRun string `json:"from_run"`
+			RunID   string `json:"run_id"`
+			Status  string `json:"status"`
+		} `json:"results"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/requeue", map[string]any{
+		"run_ids": failedRunIDs,
+	}, &resp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202 bulk requeue response, got %d", status)
+	}
+	if resp.Count != 2 || len(resp.Results) != 2 {
+		t.Fatalf("expected two bulk requeue results, got %+v", resp)
+	}
+	for _, item := range resp.Results {
+		if item.RunID == "" || item.RunID == item.FromRun || item.Status != "accepted" {
+			t.Fatalf("unexpected bulk requeue item: %+v", item)
+		}
+	}
+}
+
+func TestBulkRedriveRunsByFilter(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	for i := 0; i < 2; i++ {
+		result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+			Name:         "api-bulk-redrive-" + string(rune('a'+i)),
+			TenantID:     "tenant-api",
+			Queue:        "default",
+			Kind:         "http",
+			Payload:      map[string]any{"url": "https://example.internal/task"},
+			ScheduleType: "once",
+		})
+		if err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		worker, err := jobStore.RegisterWorker(ctx, store.RegisterWorkerInput{
+			Name:           "api-bulk-redrive-worker-" + string(rune('a'+i)),
+			Queues:         []string{"default"},
+			Capabilities:   map[string]any{"http": true},
+			MaxConcurrency: 1,
+			Metadata:       map[string]any{"role": "api"},
+		})
+		if err != nil {
+			t.Fatalf("register worker: %v", err)
+		}
+		if _, err := jobStore.DB().ExecContext(ctx, `
+			UPDATE runs
+			SET status = 'RUNNING', worker_id = $2, lease_token = 1,
+			    lease_expires_at = NOW() + INTERVAL '30 seconds', started_at = NOW(), updated_at = NOW()
+			WHERE id = $1
+		`, *result.RunID, worker.WorkerID); err != nil {
+			t.Fatalf("mark run running: %v", err)
+		}
+		if err := jobStore.FailRun(ctx, store.FailRunInput{
+			WorkerID: worker.WorkerID, RunID: *result.RunID, LeaseToken: 1,
+			ErrorCode: "HTTP_500", ErrorMessage: "terminal failure", Retryable: false,
+		}); err != nil {
+			t.Fatalf("fail run: %v", err)
+		}
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var resp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			FromRun string `json:"from_run"`
+			RunID   string `json:"run_id"`
+			Status  string `json:"status"`
+		} `json:"results"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/redrive", map[string]any{
+		"tenant_id":      "tenant-api",
+		"dead_lettered":  true,
+		"status":         []string{"FAILED"},
+	}, &resp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202 bulk redrive response, got %d", status)
+	}
+	if resp.Count != 2 || len(resp.Results) != 2 {
+		t.Fatalf("expected two bulk redrive results, got %+v", resp)
+	}
+}
+
+func TestBulkCancelRunsByFilter(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-bulk-cancel",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create cron job: %v", err)
+	}
+	if _, err := jobStore.DB().ExecContext(ctx, `UPDATE job_schedules SET next_run_at = NOW() - INTERVAL '1 second' WHERE job_id = $1`, result.JobID); err != nil {
+		t.Fatalf("set due schedule: %v", err)
+	}
+	if _, err := jobStore.MaterializeDueRuns(ctx, 2); err != nil {
+		t.Fatalf("materialize due runs: %v", err)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var resp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			FromRun string `json:"from_run"`
+			Status  string `json:"status"`
+		} `json:"results"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/cancel", map[string]any{
+		"job_id": result.JobID,
+		"status": []string{"PENDING"},
+	}, &resp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk cancel response, got %d", status)
+	}
+	if resp.Count == 0 || len(resp.Results) == 0 {
+		t.Fatalf("expected canceled runs, got %+v", resp)
+	}
+	for _, item := range resp.Results {
+		if item.Status != "canceled" {
+			t.Fatalf("unexpected bulk cancel item: %+v", item)
+		}
+	}
+}
+
 func TestRegisterWorkerReusesIdentityByName(t *testing.T) {
 	jobStore := openTestStore(t)
 
