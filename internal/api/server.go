@@ -1213,6 +1213,18 @@ func (s *Server) handleBulkRequeueRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]BulkRunOperationItem, 0, len(runs))
 	for _, run := range runs {
+		if req.DryRun {
+			item := BulkRunOperationItem{FromRun: run.ID}
+			if run.Status == "FAILED" || run.Status == "TIMED_OUT" || run.Status == "CANCELED" {
+				item.Status = "would_accept"
+			} else {
+				item.Status = "would_skip"
+				item.ErrorCode = "RUN_REQUEUE_CONFLICT"
+				item.ErrorMessage = "run cannot be requeued in its current state"
+			}
+			results = append(results, item)
+			continue
+		}
 		newRunID, err := s.store.RequeueRun(ctx, run.ID, s.auditInput(principal, "RUN_REQUEUE", "run", run.ID, run.TenantID, map[string]any{"job_id": run.JobID, "bulk": true}))
 		if err != nil {
 			switch {
@@ -1229,7 +1241,11 @@ func (s *Server) handleBulkRequeueRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		results = append(results, BulkRunOperationItem{FromRun: run.ID, RunID: newRunID, Status: "accepted"})
 	}
-	writeJSON(w, http.StatusAccepted, BulkRunOperationResponse{Count: len(results), Results: results})
+	statusCode := http.StatusAccepted
+	if req.DryRun {
+		statusCode = http.StatusOK
+	}
+	writeJSON(w, statusCode, BulkRunOperationResponse{Count: len(results), Results: results})
 }
 
 func (s *Server) handleBulkRedriveRuns(w http.ResponseWriter, r *http.Request) {
@@ -1267,6 +1283,18 @@ func (s *Server) handleBulkRedriveRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]BulkRunOperationItem, 0, len(runs))
 	for _, run := range runs {
+		if req.DryRun {
+			item := BulkRunOperationItem{FromRun: run.ID}
+			if run.DeadLetteredAt == nil {
+				item.Status = "would_skip"
+				item.ErrorCode = "RUN_NOT_DEAD_LETTERED"
+				item.ErrorMessage = "run is not in the dead-letter queue"
+			} else {
+				item.Status = "would_accept"
+			}
+			results = append(results, item)
+			continue
+		}
 		if run.DeadLetteredAt == nil {
 			results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "skipped", ErrorCode: "RUN_NOT_DEAD_LETTERED", ErrorMessage: "run is not in the dead-letter queue"})
 			continue
@@ -1287,7 +1315,11 @@ func (s *Server) handleBulkRedriveRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		results = append(results, BulkRunOperationItem{FromRun: run.ID, RunID: newRunID, Status: "accepted"})
 	}
-	writeJSON(w, http.StatusAccepted, BulkRunOperationResponse{Count: len(results), Results: results})
+	statusCode := http.StatusAccepted
+	if req.DryRun {
+		statusCode = http.StatusOK
+	}
+	writeJSON(w, statusCode, BulkRunOperationResponse{Count: len(results), Results: results})
 }
 
 func (s *Server) handleBulkCancelRuns(w http.ResponseWriter, r *http.Request) {
@@ -1323,24 +1355,40 @@ func (s *Server) handleBulkCancelRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load runs")
 		return
 	}
-	canceled, err := s.store.CancelRuns(ctx, extractRunIDs(runs), "canceled via bulk api", s.auditInput(principal, "RUN_CANCEL", "run_batch", "bulk", tenantIDForRuns(runs), map[string]any{"count": len(runs)}))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to cancel runs")
-		return
-	}
-	canceledSet := make(map[string]struct{}, len(canceled))
-	for _, runID := range canceled {
-		canceledSet[runID] = struct{}{}
+	var canceledSet map[string]struct{}
+	if !req.DryRun {
+		canceled, err := s.store.CancelRuns(ctx, extractRunIDs(runs), "canceled via bulk api", s.auditInput(principal, "RUN_CANCEL", "run_batch", "bulk", tenantIDForRuns(runs), map[string]any{"count": len(runs)}))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to cancel runs")
+			return
+		}
+		canceledSet = make(map[string]struct{}, len(canceled))
+		for _, runID := range canceled {
+			canceledSet[runID] = struct{}{}
+		}
 	}
 	results := make([]BulkRunOperationItem, 0, len(runs))
 	for _, run := range runs {
+		if req.DryRun {
+			item := BulkRunOperationItem{FromRun: run.ID}
+			if run.Status == "PENDING" || run.Status == "RUNNING" {
+				item.Status = "would_cancel"
+			} else {
+				item.Status = "would_skip"
+				item.ErrorCode = "RUN_CANCEL_CONFLICT"
+				item.ErrorMessage = "run cannot be canceled in its current state"
+			}
+			results = append(results, item)
+			continue
+		}
 		if _, ok := canceledSet[run.ID]; ok {
 			results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "canceled"})
 			continue
 		}
 		results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "skipped", ErrorCode: "RUN_CANCEL_CONFLICT", ErrorMessage: "run cannot be canceled in its current state"})
 	}
-	writeJSON(w, http.StatusOK, BulkRunOperationResponse{Count: len(results), Results: results})
+	statusCode := http.StatusOK
+	writeJSON(w, statusCode, BulkRunOperationResponse{Count: len(results), Results: results})
 }
 
 func extractRunIDs(runs []store.Run) []string {

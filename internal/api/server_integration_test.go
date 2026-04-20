@@ -1737,7 +1737,7 @@ func TestBulkRequeueRunsByID(t *testing.T) {
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
-	var resp struct {
+	var dryRunResp struct {
 		Count   int `json:"count"`
 		Results []struct {
 			FromRun      string `json:"from_run"`
@@ -1748,6 +1748,44 @@ func TestBulkRequeueRunsByID(t *testing.T) {
 		} `json:"results"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/requeue", map[string]any{
+		"run_ids":  append(failedRunIDs, *succeeded.RunID),
+		"dry_run": true,
+	}, &dryRunResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk requeue dry-run response, got %d", status)
+	}
+	for _, item := range dryRunResp.Results {
+		if item.RunID != "" {
+			t.Fatalf("expected no run ids during dry-run, got %+v", item)
+		}
+		if item.Status != "would_accept" && item.Status != "would_skip" {
+			t.Fatalf("expected would_accept/would_skip statuses during dry-run, got %+v", item)
+		}
+	}
+	countRuns := func() int {
+		rows, err := jobStore.ListRuns(ctx, store.RunFilter{TenantID: "tenant-api", Limit: 100})
+		if err != nil {
+			t.Fatalf("list runs after dry-run: %v", err)
+		}
+		return len(rows)
+	}
+	beforeCount := countRuns()
+	afterDryRun := countRuns()
+	if afterDryRun != beforeCount {
+		t.Fatalf("expected dry-run to leave runs unchanged, before=%d after=%d", beforeCount, afterDryRun)
+	}
+
+	var resp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			FromRun      string `json:"from_run"`
+			RunID        string `json:"run_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/requeue", map[string]any{
 		"run_ids": append(failedRunIDs, *succeeded.RunID),
 	}, &resp)
 	if status != http.StatusAccepted {
@@ -1826,7 +1864,7 @@ func TestBulkRedriveRunsByFilter(t *testing.T) {
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
-	var resp struct {
+	var dryRunResp struct {
 		Count   int `json:"count"`
 		Results []struct {
 			FromRun      string `json:"from_run"`
@@ -1837,6 +1875,42 @@ func TestBulkRedriveRunsByFilter(t *testing.T) {
 		} `json:"results"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/redrive", map[string]any{
+		"tenant_id":     "tenant-api",
+		"dead_lettered": true,
+		"status":        []string{"FAILED", "PENDING"},
+		"dry_run":       true,
+	}, &dryRunResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk redrive dry-run response, got %d", status)
+	}
+	for _, item := range dryRunResp.Results {
+		if item.RunID != "" {
+			t.Fatalf("expected no run ids during dry-run, got %+v", item)
+		}
+		if item.Status != "would_accept" && item.Status != "would_skip" {
+			t.Fatalf("expected would_accept/would_skip statuses during dry-run, got %+v", item)
+		}
+	}
+	deadLettered := true
+	rowsAfterDryRun, err := jobStore.ListRuns(ctx, store.RunFilter{TenantID: "tenant-api", DeadLettered: &deadLettered, Limit: 100})
+	if err != nil {
+		t.Fatalf("list runs after redrive dry-run: %v", err)
+	}
+	if len(rowsAfterDryRun) != 2 {
+		t.Fatalf("expected dry-run to leave dead-lettered runs unchanged, got %+v", rowsAfterDryRun)
+	}
+
+	var resp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			FromRun      string `json:"from_run"`
+			RunID        string `json:"run_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/redrive", map[string]any{
 		"tenant_id":     "tenant-api",
 		"dead_lettered": true,
 		"status":        []string{"FAILED", "PENDING"},
@@ -1927,7 +2001,7 @@ func TestBulkCancelRunsByFilter(t *testing.T) {
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
-	var resp struct {
+	var dryRunResp struct {
 		Count   int `json:"count"`
 		Results []struct {
 			FromRun      string `json:"from_run"`
@@ -1937,6 +2011,41 @@ func TestBulkCancelRunsByFilter(t *testing.T) {
 		} `json:"results"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/cancel", map[string]any{
+		"job_id":  result.JobID,
+		"dry_run": true,
+	}, &dryRunResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk cancel dry-run response, got %d", status)
+	}
+	for _, item := range dryRunResp.Results {
+		if item.Status != "would_cancel" && item.Status != "would_skip" {
+			t.Fatalf("expected would_cancel/would_skip statuses during dry-run, got %+v", item)
+		}
+	}
+	runsAfterDryRun, err := jobStore.ListRuns(ctx, store.RunFilter{JobID: result.JobID, Limit: 100})
+	if err != nil {
+		t.Fatalf("list runs after cancel dry-run: %v", err)
+	}
+	pendingCount := 0
+	for _, run := range runsAfterDryRun {
+		if run.Status == "PENDING" {
+			pendingCount++
+		}
+	}
+	if pendingCount == 0 {
+		t.Fatalf("expected dry-run to preserve pending work, got %+v", runsAfterDryRun)
+	}
+
+	var resp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			FromRun      string `json:"from_run"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/cancel", map[string]any{
 		"job_id": result.JobID,
 	}, &resp)
 	if status != http.StatusOK {

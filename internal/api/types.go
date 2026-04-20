@@ -149,6 +149,7 @@ type BulkRunOperationRequest struct {
 	JobID        string   `json:"job_id,omitempty"`
 	Statuses     []string `json:"status,omitempty"`
 	DeadLettered *bool    `json:"dead_lettered,omitempty"`
+	DryRun       bool     `json:"dry_run,omitempty"`
 }
 
 type BulkRunOperationItem struct {
