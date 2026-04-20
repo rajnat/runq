@@ -164,6 +164,27 @@ type BulkRunOperationResponse struct {
 	Results []BulkRunOperationItem `json:"results"`
 }
 
+type BulkJobOperationRequest struct {
+	JobIDs   []string `json:"job_ids,omitempty"`
+	TenantID string   `json:"tenant_id,omitempty"`
+	Queue    string   `json:"queue,omitempty"`
+	Kind     string   `json:"kind,omitempty"`
+	Paused   *bool    `json:"paused,omitempty"`
+	Disabled *bool    `json:"disabled,omitempty"`
+}
+
+type BulkJobOperationItem struct {
+	JobID        string `json:"job_id"`
+	Status       string `json:"status"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+type BulkJobOperationResponse struct {
+	Count   int                    `json:"count"`
+	Results []BulkJobOperationItem `json:"results"`
+}
+
 type RequeueRunResponse struct {
 	RunID   string `json:"run_id"`
 	Status  string `json:"status"`
@@ -321,6 +342,18 @@ func (r BulkRunOperationRequest) Validate() error {
 	for _, id := range r.RunIDs {
 		if strings.TrimSpace(id) == "" {
 			return errors.New("run_ids must not contain blank values")
+		}
+	}
+	return nil
+}
+
+func (r BulkJobOperationRequest) Validate() error {
+	if len(r.JobIDs) == 0 && strings.TrimSpace(r.TenantID) == "" && strings.TrimSpace(r.Queue) == "" && strings.TrimSpace(r.Kind) == "" && r.Paused == nil && r.Disabled == nil {
+		return errors.New("at least one selector is required")
+	}
+	for _, id := range r.JobIDs {
+		if strings.TrimSpace(id) == "" {
+			return errors.New("job_ids must not contain blank values")
 		}
 	}
 	return nil

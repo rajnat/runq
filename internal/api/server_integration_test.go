@@ -309,8 +309,10 @@ func TestUpdateCronJobSchedule(t *testing.T) {
 		t.Fatalf("expected 202 create cron job, got %d", status)
 	}
 
+	var beforeCronExpr string
+	var beforeTimezone string
 	var beforeNextRunAt time.Time
-	if err := jobStore.DB().QueryRowContext(context.Background(), `SELECT next_run_at FROM job_schedules WHERE job_id = $1`, createResp.JobID).Scan(&beforeNextRunAt); err != nil {
+	if err := jobStore.DB().QueryRowContext(context.Background(), `SELECT cron_expr, timezone, next_run_at FROM job_schedules WHERE job_id = $1`, createResp.JobID).Scan(&beforeCronExpr, &beforeTimezone, &beforeNextRunAt); err != nil {
 		t.Fatalf("load cron schedule before update: %v", err)
 	}
 
@@ -337,12 +339,17 @@ func TestUpdateCronJobSchedule(t *testing.T) {
 		t.Fatalf("expected updated timezone, got %+v", updateResp.Job)
 	}
 
+	var afterCronExpr string
+	var afterTimezone string
 	var afterNextRunAt time.Time
-	if err := jobStore.DB().QueryRowContext(context.Background(), `SELECT next_run_at FROM job_schedules WHERE job_id = $1`, createResp.JobID).Scan(&afterNextRunAt); err != nil {
+	if err := jobStore.DB().QueryRowContext(context.Background(), `SELECT cron_expr, timezone, next_run_at FROM job_schedules WHERE job_id = $1`, createResp.JobID).Scan(&afterCronExpr, &afterTimezone, &afterNextRunAt); err != nil {
 		t.Fatalf("load cron schedule after update: %v", err)
 	}
-	if !afterNextRunAt.After(beforeNextRunAt) {
-		t.Fatalf("expected next_run_at to be recomputed, before=%s after=%s", beforeNextRunAt, afterNextRunAt)
+	if afterCronExpr != "0 * * * *" || afterTimezone != "America/New_York" {
+		t.Fatalf("expected persisted cron schedule update, got cron=%q timezone=%q", afterCronExpr, afterTimezone)
+	}
+	if afterNextRunAt.Before(beforeNextRunAt) {
+		t.Fatalf("expected recomputed next_run_at to stay current, before=%s after=%s", beforeNextRunAt, afterNextRunAt)
 	}
 }
 
@@ -1780,6 +1787,191 @@ func TestBulkCancelRunsByFilter(t *testing.T) {
 	}
 	if canceled == 0 || skipped == 0 {
 		t.Fatalf("expected mixed canceled/skipped results, got %+v", resp.Results)
+	}
+}
+
+func TestBulkDisableAndEnableJobs(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	jobIDs := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+			Name:         "api-bulk-disable-" + string(rune('a'+i)),
+			TenantID:     "tenant-api",
+			Queue:        "default",
+			Kind:         "http",
+			Payload:      map[string]any{"url": "https://example.internal/task"},
+			ScheduleType: "once",
+		})
+		if err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		jobIDs = append(jobIDs, result.JobID)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var disableResp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			JobID         string `json:"job_id"`
+			Status        string `json:"status"`
+			ErrorCode     string `json:"error_code"`
+			ErrorMessage  string `json:"error_message"`
+		} `json:"results"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/disable", map[string]any{
+		"job_ids": jobIDs,
+	}, &disableResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk disable response, got %d", status)
+	}
+	if disableResp.Count != 2 || len(disableResp.Results) != 2 {
+		t.Fatalf("expected two disabled jobs, got %+v", disableResp)
+	}
+	for _, item := range disableResp.Results {
+		if item.Status != "disabled" {
+			t.Fatalf("unexpected bulk disable item: %+v", item)
+		}
+	}
+
+	var enableResp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			JobID         string `json:"job_id"`
+			Status        string `json:"status"`
+			ErrorCode     string `json:"error_code"`
+			ErrorMessage  string `json:"error_message"`
+		} `json:"results"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/enable", map[string]any{
+		"job_ids": jobIDs,
+	}, &enableResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk enable response, got %d", status)
+	}
+	if enableResp.Count != 2 || len(enableResp.Results) != 2 {
+		t.Fatalf("expected two enabled jobs, got %+v", enableResp)
+	}
+	for _, item := range enableResp.Results {
+		if item.Status != "active" {
+			t.Fatalf("unexpected bulk enable item: %+v", item)
+		}
+	}
+}
+
+func TestBulkPauseAndResumeJobsWithPartialFailures(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	activeJob, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-bulk-pause-active",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create active job: %v", err)
+	}
+	disabledJob, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-bulk-pause-disabled",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create disabled job: %v", err)
+	}
+	if _, err := jobStore.DisableJob(ctx, disabledJob.JobID, nil); err != nil {
+		t.Fatalf("disable seed job: %v", err)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var pauseResp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			JobID        string `json:"job_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/pause", map[string]any{
+		"job_ids": []string{activeJob.JobID, disabledJob.JobID},
+	}, &pauseResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk pause response, got %d", status)
+	}
+	if pauseResp.Count != 2 || len(pauseResp.Results) != 2 {
+		t.Fatalf("expected two bulk pause results, got %+v", pauseResp)
+	}
+	paused := 0
+	skipped := 0
+	for _, item := range pauseResp.Results {
+		switch item.Status {
+		case "paused":
+			paused++
+		case "skipped":
+			skipped++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected skip reason, got %+v", item)
+			}
+		default:
+			t.Fatalf("unexpected bulk pause item: %+v", item)
+		}
+	}
+	if paused != 1 || skipped != 1 {
+		t.Fatalf("expected one paused and one skipped result, got %+v", pauseResp.Results)
+	}
+
+	var resumeResp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			JobID        string `json:"job_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/resume", map[string]any{
+		"job_ids": []string{activeJob.JobID, disabledJob.JobID},
+	}, &resumeResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk resume response, got %d", status)
+	}
+	active := 0
+	skipped = 0
+	for _, item := range resumeResp.Results {
+		switch item.Status {
+		case "active":
+			active++
+		case "skipped":
+			skipped++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected skip reason, got %+v", item)
+			}
+		default:
+			t.Fatalf("unexpected bulk resume item: %+v", item)
+		}
+	}
+	if active != 1 || skipped != 1 {
+		t.Fatalf("expected one resumed and one skipped result, got %+v", resumeResp.Results)
 	}
 }
 

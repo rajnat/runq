@@ -88,6 +88,10 @@ func (s *Server) routes() {
 	s.handle("GET /v1/jobs", s.handleListJobs)
 	s.handle("GET /v1/jobs/{jobID}", s.handleGetJob)
 	s.handle("PATCH /v1/jobs/{jobID}", s.handleUpdateJob)
+	s.handle("POST /v1/jobs/disable", s.handleBulkDisableJobs)
+	s.handle("POST /v1/jobs/enable", s.handleBulkEnableJobs)
+	s.handle("POST /v1/jobs/pause", s.handleBulkPauseJobs)
+	s.handle("POST /v1/jobs/resume", s.handleBulkResumeJobs)
 	s.handle("POST /v1/jobs/{jobID}/disable", s.handleDisableJob)
 	s.handle("POST /v1/jobs/{jobID}/enable", s.handleEnableJob)
 	s.handle("POST /v1/jobs/{jobID}/pause", s.handlePauseJob)
@@ -314,6 +318,215 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+func (s *Server) selectJobsForBulkOperation(ctx context.Context, principal principal, req BulkJobOperationRequest) ([]store.Job, error) {
+	if len(req.JobIDs) > 0 {
+		jobs := make([]store.Job, 0, len(req.JobIDs))
+		for _, jobID := range req.JobIDs {
+			job, err := s.store.GetJob(ctx, strings.TrimSpace(jobID))
+			if err != nil {
+				return nil, err
+			}
+			if !canAccessTenant(principal, job.TenantID) {
+				return nil, store.ErrConflict
+			}
+			jobs = append(jobs, job)
+		}
+		return jobs, nil
+	}
+	filterTenantID, allowed := authorizedTenantFilter(principal, req.TenantID)
+	if !allowed {
+		return nil, store.ErrConflict
+	}
+	jobs, err := s.store.ListJobs(ctx, store.JobFilter{
+		TenantID: filterTenantID,
+		Queue:    strings.TrimSpace(req.Queue),
+		Kind:     strings.TrimSpace(req.Kind),
+		Disabled: req.Disabled,
+		Paused:   req.Paused,
+		Limit:    200,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+func (s *Server) handleBulkDisableJobs(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok { return }
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot disable jobs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var req BulkJobOperationRequest
+	if ok := decodeJSONBody(w, r, &req); !ok { return }
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	jobs, err := s.selectJobsForBulkOperation(ctx, principal, req)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load jobs")
+		return
+	}
+	results := make([]BulkJobOperationItem, 0, len(jobs))
+	for _, job := range jobs {
+		result, err := s.store.DisableJob(ctx, job.ID, s.auditInput(principal, "JOB_DISABLE", "job", job.ID, job.TenantID, map[string]any{"bulk": true}))
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				results = append(results, BulkJobOperationItem{JobID: job.ID, Status: "skipped", ErrorCode: "JOB_DISABLE_CONFLICT", ErrorMessage: "job cannot be disabled in its current state"})
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to disable jobs")
+			return
+		}
+		results = append(results, BulkJobOperationItem{JobID: result.JobID, Status: result.Status})
+	}
+	writeJSON(w, http.StatusOK, BulkJobOperationResponse{Count: len(results), Results: results})
+}
+
+func (s *Server) handleBulkEnableJobs(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok { return }
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot enable jobs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var req BulkJobOperationRequest
+	if ok := decodeJSONBody(w, r, &req); !ok { return }
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	jobs, err := s.selectJobsForBulkOperation(ctx, principal, req)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load jobs")
+		return
+	}
+	results := make([]BulkJobOperationItem, 0, len(jobs))
+	for _, job := range jobs {
+		result, err := s.store.EnableJob(ctx, job.ID, s.auditInput(principal, "JOB_ENABLE", "job", job.ID, job.TenantID, map[string]any{"bulk": true}))
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				results = append(results, BulkJobOperationItem{JobID: job.ID, Status: "skipped", ErrorCode: "JOB_ENABLE_CONFLICT", ErrorMessage: "job cannot be enabled in its current state"})
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to enable jobs")
+			return
+		}
+		results = append(results, BulkJobOperationItem{JobID: result.JobID, Status: result.Status})
+	}
+	writeJSON(w, http.StatusOK, BulkJobOperationResponse{Count: len(results), Results: results})
+}
+
+func (s *Server) handleBulkPauseJobs(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok { return }
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot pause jobs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var req BulkJobOperationRequest
+	if ok := decodeJSONBody(w, r, &req); !ok { return }
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	jobs, err := s.selectJobsForBulkOperation(ctx, principal, req)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load jobs")
+		return
+	}
+	results := make([]BulkJobOperationItem, 0, len(jobs))
+	for _, job := range jobs {
+		result, err := s.store.PauseJob(ctx, job.ID, s.auditInput(principal, "JOB_PAUSE", "job", job.ID, job.TenantID, map[string]any{"bulk": true}))
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				results = append(results, BulkJobOperationItem{JobID: job.ID, Status: "skipped", ErrorCode: "JOB_PAUSE_CONFLICT", ErrorMessage: "job cannot be paused in its current state"})
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to pause jobs")
+			return
+		}
+		results = append(results, BulkJobOperationItem{JobID: result.JobID, Status: result.Status})
+	}
+	writeJSON(w, http.StatusOK, BulkJobOperationResponse{Count: len(results), Results: results})
+}
+
+func (s *Server) handleBulkResumeJobs(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok { return }
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot resume jobs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var req BulkJobOperationRequest
+	if ok := decodeJSONBody(w, r, &req); !ok { return }
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	jobs, err := s.selectJobsForBulkOperation(ctx, principal, req)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load jobs")
+		return
+	}
+	results := make([]BulkJobOperationItem, 0, len(jobs))
+	for _, job := range jobs {
+		result, err := s.store.ResumeJob(ctx, job.ID, s.auditInput(principal, "JOB_RESUME", "job", job.ID, job.TenantID, map[string]any{"bulk": true}))
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				results = append(results, BulkJobOperationItem{JobID: job.ID, Status: "skipped", ErrorCode: "JOB_RESUME_CONFLICT", ErrorMessage: "job cannot be resumed in its current state"})
+				continue
+			}
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to resume jobs")
+			return
+		}
+		results = append(results, BulkJobOperationItem{JobID: result.JobID, Status: result.Status})
+	}
+	writeJSON(w, http.StatusOK, BulkJobOperationResponse{Count: len(results), Results: results})
 }
 
 func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
