@@ -106,6 +106,7 @@ func (s *Server) routes() {
 	s.handle("POST /v1/runs/requeue", s.handleBulkRequeueRuns)
 	s.handle("POST /v1/runs/redrive", s.handleBulkRedriveRuns)
 	s.handle("POST /v1/runs/cancel", s.handleBulkCancelRuns)
+	s.handle("POST /v1/runs/{runID}/cancel", s.handleCancelRun)
 	s.handle("POST /v1/runs/{runID}/requeue", s.handleRequeueRun)
 	s.handle("POST /v1/runs/{runID}/redrive", s.handleRedriveRun)
 	s.handle("POST /v1/jobs", s.handleCreateJob)
@@ -1355,6 +1356,43 @@ func tenantIDForRuns(runs []store.Run) string {
 		return ""
 	}
 	return runs[0].TenantID
+}
+
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot cancel runs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	run, _, err := s.store.GetRun(ctx, r.PathValue("runID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load run")
+		return
+	}
+	if !canAccessTenant(principal, run.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+	canceled, err := s.store.CancelRuns(ctx, []string{run.ID}, "canceled via api", s.auditInput(principal, "RUN_CANCEL", "run", run.ID, run.TenantID, nil))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to cancel run")
+		return
+	}
+	if len(canceled) == 0 {
+		writeError(w, http.StatusConflict, "RUN_CANCEL_CONFLICT", "run cannot be canceled in its current state")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"from_run": run.ID, "status": "canceled"})
 }
 
 func (s *Server) handleRequeueRun(w http.ResponseWriter, r *http.Request) {

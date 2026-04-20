@@ -1348,6 +1348,101 @@ func TestWorkerCannotAccessRunConsoleEndpoints(t *testing.T) {
 	}
 }
 
+func TestCancelRunEndpointCancelsPendingRun(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-cancel-run",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var resp struct {
+		FromRun string `json:"from_run"`
+		Status  string `json:"status"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/"+*result.RunID+"/cancel", nil, &resp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 cancel run response, got %d", status)
+	}
+	if resp.FromRun != *result.RunID || resp.Status != "canceled" {
+		t.Fatalf("unexpected cancel run response: %+v", resp)
+	}
+
+	var runResp GetRunResponse
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs/"+*result.RunID, nil, &runResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 get canceled run, got %d", status)
+	}
+	if runResp.Run.Status != "CANCELED" {
+		t.Fatalf("expected canceled run, got %+v", runResp.Run)
+	}
+}
+
+func TestCancelRunEndpointRejectsTerminalRun(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-cancel-run-terminal",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	worker, err := jobStore.RegisterWorker(ctx, store.RegisterWorkerInput{
+		Name:           "api-cancel-run-worker",
+		Queues:         []string{"default"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "api"},
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if _, err := jobStore.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING', worker_id = $2, lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds',
+		    started_at = NOW(), updated_at = NOW()
+		WHERE id = $1
+	`, *result.RunID, worker.WorkerID); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	if err := jobStore.CompleteRun(ctx, store.CompleteRunInput{
+		WorkerID: worker.WorkerID, RunID: *result.RunID, LeaseToken: 1,
+		Result: map[string]any{"status_code": 200},
+	}); err != nil {
+		t.Fatalf("complete run: %v", err)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/"+*result.RunID+"/cancel", nil, &map[string]any{})
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 canceling terminal run, got %d", status)
+	}
+}
+
 func TestRequeueRunEndpointCreatesFreshPendingRun(t *testing.T) {
 	jobStore := openTestStore(t)
 	ctx := context.Background()
