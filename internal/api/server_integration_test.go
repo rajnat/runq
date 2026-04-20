@@ -1515,6 +1515,42 @@ func TestBulkRequeueRunsByID(t *testing.T) {
 		failedRunIDs = append(failedRunIDs, *result.RunID)
 	}
 
+	succeeded, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-bulk-requeue-succeeded",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create succeeded job: %v", err)
+	}
+	worker, err := jobStore.RegisterWorker(ctx, store.RegisterWorkerInput{
+		Name:           "api-bulk-requeue-worker-success",
+		Queues:         []string{"default"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "api"},
+	})
+	if err != nil {
+		t.Fatalf("register success worker: %v", err)
+	}
+	if _, err := jobStore.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING', worker_id = $2, lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds', started_at = NOW(), updated_at = NOW()
+		WHERE id = $1
+	`, *succeeded.RunID, worker.WorkerID); err != nil {
+		t.Fatalf("mark succeeded run running: %v", err)
+	}
+	if err := jobStore.CompleteRun(ctx, store.CompleteRunInput{
+		WorkerID: worker.WorkerID, RunID: *succeeded.RunID, LeaseToken: 1,
+		Result: map[string]any{"status_code": 200},
+	}); err != nil {
+		t.Fatalf("complete run: %v", err)
+	}
+
 	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
@@ -1522,24 +1558,42 @@ func TestBulkRequeueRunsByID(t *testing.T) {
 	var resp struct {
 		Count   int `json:"count"`
 		Results []struct {
-			FromRun string `json:"from_run"`
-			RunID   string `json:"run_id"`
-			Status  string `json:"status"`
+			FromRun      string `json:"from_run"`
+			RunID        string `json:"run_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
 		} `json:"results"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/requeue", map[string]any{
-		"run_ids": failedRunIDs,
+		"run_ids": append(failedRunIDs, *succeeded.RunID),
 	}, &resp)
 	if status != http.StatusAccepted {
 		t.Fatalf("expected 202 bulk requeue response, got %d", status)
 	}
-	if resp.Count != 2 || len(resp.Results) != 2 {
-		t.Fatalf("expected two bulk requeue results, got %+v", resp)
+	if resp.Count != 3 || len(resp.Results) != 3 {
+		t.Fatalf("expected three bulk requeue results, got %+v", resp)
 	}
+	accepted := 0
+	skipped := 0
 	for _, item := range resp.Results {
-		if item.RunID == "" || item.RunID == item.FromRun || item.Status != "accepted" {
+		switch item.Status {
+		case "accepted":
+			accepted++
+			if item.RunID == "" || item.RunID == item.FromRun {
+				t.Fatalf("unexpected accepted bulk requeue item: %+v", item)
+			}
+		case "skipped":
+			skipped++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected skip reason, got %+v", item)
+			}
+		default:
 			t.Fatalf("unexpected bulk requeue item: %+v", item)
 		}
+	}
+	if accepted != 2 || skipped != 1 {
+		t.Fatalf("expected 2 accepted and 1 skipped result, got %+v", resp.Results)
 	}
 }
 
@@ -1593,21 +1647,41 @@ func TestBulkRedriveRunsByFilter(t *testing.T) {
 	var resp struct {
 		Count   int `json:"count"`
 		Results []struct {
-			FromRun string `json:"from_run"`
-			RunID   string `json:"run_id"`
-			Status  string `json:"status"`
+			FromRun      string `json:"from_run"`
+			RunID        string `json:"run_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
 		} `json:"results"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/redrive", map[string]any{
-		"tenant_id":      "tenant-api",
-		"dead_lettered":  true,
-		"status":         []string{"FAILED"},
+		"tenant_id":     "tenant-api",
+		"dead_lettered": true,
+		"status":        []string{"FAILED", "PENDING"},
 	}, &resp)
 	if status != http.StatusAccepted {
 		t.Fatalf("expected 202 bulk redrive response, got %d", status)
 	}
 	if resp.Count != 2 || len(resp.Results) != 2 {
 		t.Fatalf("expected two bulk redrive results, got %+v", resp)
+	}
+	accepted := 0
+	skipped := 0
+	for _, item := range resp.Results {
+		switch item.Status {
+		case "accepted":
+			accepted++
+		case "skipped":
+			skipped++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected skip reason, got %+v", item)
+			}
+		default:
+			t.Fatalf("unexpected bulk redrive item: %+v", item)
+		}
+	}
+	if accepted != 2 || skipped != 0 {
+		t.Fatalf("expected two accepted redrive results, got %+v", resp.Results)
 	}
 }
 
@@ -1635,6 +1709,37 @@ func TestBulkCancelRunsByFilter(t *testing.T) {
 	if _, err := jobStore.MaterializeDueRuns(ctx, 2); err != nil {
 		t.Fatalf("materialize due runs: %v", err)
 	}
+	runs, err := jobStore.ListRuns(ctx, store.RunFilter{JobID: result.JobID})
+	if err != nil {
+		t.Fatalf("list runs before cancel: %v", err)
+	}
+	worker, err := jobStore.RegisterWorker(ctx, store.RegisterWorkerInput{
+		Name:           "api-bulk-cancel-worker",
+		Queues:         []string{"default"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "api"},
+	})
+	if err != nil {
+		t.Fatalf("register cancel worker: %v", err)
+	}
+	if _, err := jobStore.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING', worker_id = $2, lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds', started_at = NOW(), updated_at = NOW()
+		WHERE id = $1
+	`, runs[0].ID, worker.WorkerID); err != nil {
+		t.Fatalf("mark cancel run running: %v", err)
+	}
+	if err := jobStore.CompleteRun(ctx, store.CompleteRunInput{
+		WorkerID: worker.WorkerID, RunID: runs[0].ID, LeaseToken: 1,
+		Result: map[string]any{"status_code": 200},
+	}); err != nil {
+		t.Fatalf("complete one run before bulk cancel: %v", err)
+	}
+	if _, err := jobStore.TriggerJob(ctx, result.JobID, nil); err != nil {
+		t.Fatalf("trigger fresh pending run before bulk cancel: %v", err)
+	}
 
 	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
@@ -1643,24 +1748,38 @@ func TestBulkCancelRunsByFilter(t *testing.T) {
 	var resp struct {
 		Count   int `json:"count"`
 		Results []struct {
-			FromRun string `json:"from_run"`
-			Status  string `json:"status"`
+			FromRun      string `json:"from_run"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
 		} `json:"results"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/cancel", map[string]any{
 		"job_id": result.JobID,
-		"status": []string{"PENDING"},
 	}, &resp)
 	if status != http.StatusOK {
 		t.Fatalf("expected 200 bulk cancel response, got %d", status)
 	}
-	if resp.Count == 0 || len(resp.Results) == 0 {
-		t.Fatalf("expected canceled runs, got %+v", resp)
+	if resp.Count < 2 || len(resp.Results) < 2 {
+		t.Fatalf("expected at least two bulk cancel results, got %+v", resp)
 	}
+	canceled := 0
+	skipped := 0
 	for _, item := range resp.Results {
-		if item.Status != "canceled" {
+		switch item.Status {
+		case "canceled":
+			canceled++
+		case "skipped":
+			skipped++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected skip reason, got %+v", item)
+			}
+		default:
 			t.Fatalf("unexpected bulk cancel item: %+v", item)
 		}
+	}
+	if canceled == 0 || skipped == 0 {
+		t.Fatalf("expected mixed canceled/skipped results, got %+v", resp.Results)
 	}
 }
 

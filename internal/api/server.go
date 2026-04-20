@@ -998,11 +998,17 @@ func (s *Server) handleBulkRequeueRuns(w http.ResponseWriter, r *http.Request) {
 	for _, run := range runs {
 		newRunID, err := s.store.RequeueRun(ctx, run.ID, s.auditInput(principal, "RUN_REQUEUE", "run", run.ID, run.TenantID, map[string]any{"job_id": run.JobID, "bulk": true}))
 		if err != nil {
-			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrQuotaExceeded) {
+			switch {
+			case errors.Is(err, store.ErrConflict):
+				results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "skipped", ErrorCode: "RUN_REQUEUE_CONFLICT", ErrorMessage: "run cannot be requeued in its current state"})
 				continue
+			case errors.Is(err, store.ErrQuotaExceeded):
+				results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "skipped", ErrorCode: "TENANT_QUOTA_EXCEEDED", ErrorMessage: "tenant quota exceeded for pending run admission"})
+				continue
+			default:
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to requeue runs")
+				return
 			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to requeue runs")
-			return
 		}
 		results = append(results, BulkRunOperationItem{FromRun: run.ID, RunID: newRunID, Status: "accepted"})
 	}
@@ -1045,15 +1051,22 @@ func (s *Server) handleBulkRedriveRuns(w http.ResponseWriter, r *http.Request) {
 	results := make([]BulkRunOperationItem, 0, len(runs))
 	for _, run := range runs {
 		if run.DeadLetteredAt == nil {
+			results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "skipped", ErrorCode: "RUN_NOT_DEAD_LETTERED", ErrorMessage: "run is not in the dead-letter queue"})
 			continue
 		}
 		newRunID, err := s.store.RequeueRun(ctx, run.ID, s.auditInput(principal, "RUN_REDRIVE", "run", run.ID, run.TenantID, map[string]any{"job_id": run.JobID, "bulk": true}))
 		if err != nil {
-			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrQuotaExceeded) {
+			switch {
+			case errors.Is(err, store.ErrConflict):
+				results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "skipped", ErrorCode: "RUN_REDRIVE_CONFLICT", ErrorMessage: "run cannot be redriven in its current state"})
 				continue
+			case errors.Is(err, store.ErrQuotaExceeded):
+				results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "skipped", ErrorCode: "TENANT_QUOTA_EXCEEDED", ErrorMessage: "tenant quota exceeded for pending run admission"})
+				continue
+			default:
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to redrive runs")
+				return
 			}
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to redrive runs")
-			return
 		}
 		results = append(results, BulkRunOperationItem{FromRun: run.ID, RunID: newRunID, Status: "accepted"})
 	}
@@ -1098,9 +1111,17 @@ func (s *Server) handleBulkCancelRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to cancel runs")
 		return
 	}
-	results := make([]BulkRunOperationItem, 0, len(canceled))
+	canceledSet := make(map[string]struct{}, len(canceled))
 	for _, runID := range canceled {
-		results = append(results, BulkRunOperationItem{FromRun: runID, Status: "canceled"})
+		canceledSet[runID] = struct{}{}
+	}
+	results := make([]BulkRunOperationItem, 0, len(runs))
+	for _, run := range runs {
+		if _, ok := canceledSet[run.ID]; ok {
+			results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "canceled"})
+			continue
+		}
+		results = append(results, BulkRunOperationItem{FromRun: run.ID, Status: "skipped", ErrorCode: "RUN_CANCEL_CONFLICT", ErrorMessage: "run cannot be canceled in its current state"})
 	}
 	writeJSON(w, http.StatusOK, BulkRunOperationResponse{Count: len(results), Results: results})
 }

@@ -152,9 +152,11 @@ type BulkRunOperationRequest struct {
 }
 
 type BulkRunOperationItem struct {
-	FromRun string `json:"from_run"`
-	RunID   string `json:"run_id,omitempty"`
-	Status  string `json:"status"`
+	FromRun      string `json:"from_run"`
+	RunID        string `json:"run_id,omitempty"`
+	Status       string `json:"status"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 type BulkRunOperationResponse struct {
