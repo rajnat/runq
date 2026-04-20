@@ -115,11 +115,15 @@ type RegisterWorkerResult struct {
 }
 
 type Worker struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Status          string    `json:"status"`
-	MaxConcurrency  int       `json:"max_concurrency"`
-	LastHeartbeatAt time.Time `json:"last_heartbeat_at"`
+	ID              string         `json:"id"`
+	Name            string         `json:"name"`
+	Queues          []string       `json:"queues,omitempty"`
+	Capabilities    map[string]any `json:"capabilities,omitempty"`
+	Status          string         `json:"status"`
+	MaxConcurrency  int            `json:"max_concurrency"`
+	LastHeartbeatAt time.Time      `json:"last_heartbeat_at"`
+	StartedAt       time.Time      `json:"started_at"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
 type WorkerAssignment struct {
@@ -1501,7 +1505,7 @@ func (s *Store) ListWorkers(ctx context.Context) ([]Worker, error) {
 
 func (s *Store) ListWorkersPage(ctx context.Context, filter WorkerFilter) ([]Worker, bool, *PageBoundary, error) {
 	query := `
-		SELECT id, name, status, max_concurrency, last_heartbeat_at, started_at
+		SELECT id, name, queues, capabilities, status, max_concurrency, last_heartbeat_at, started_at, metadata
 		FROM workers
 		WHERE 1=1
 	`
@@ -1531,12 +1535,31 @@ func (s *Store) ListWorkersPage(ctx context.Context, filter WorkerFilter) ([]Wor
 	startedAts := make([]time.Time, 0)
 	for rows.Next() {
 		var worker Worker
-		var startedAt time.Time
-		if err := rows.Scan(&worker.ID, &worker.Name, &worker.Status, &worker.MaxConcurrency, &worker.LastHeartbeatAt, &startedAt); err != nil {
+		var queues []byte
+		var capabilitiesBytes []byte
+		var metadataBytes []byte
+		if err := rows.Scan(&worker.ID, &worker.Name, &queues, &capabilitiesBytes, &worker.Status, &worker.MaxConcurrency, &worker.LastHeartbeatAt, &worker.StartedAt, &metadataBytes); err != nil {
 			return nil, false, nil, fmt.Errorf("scan worker: %w", err)
 		}
+		worker.Queues = parsePQArray(string(queues))
+		if len(capabilitiesBytes) > 0 {
+			if err := json.Unmarshal(capabilitiesBytes, &worker.Capabilities); err != nil {
+				return nil, false, nil, fmt.Errorf("unmarshal worker capabilities: %w", err)
+			}
+		}
+		if worker.Capabilities == nil {
+			worker.Capabilities = map[string]any{}
+		}
+		if len(metadataBytes) > 0 {
+			if err := json.Unmarshal(metadataBytes, &worker.Metadata); err != nil {
+				return nil, false, nil, fmt.Errorf("unmarshal worker metadata: %w", err)
+			}
+		}
+		if worker.Metadata == nil {
+			worker.Metadata = map[string]any{}
+		}
 		workers = append(workers, worker)
-		startedAts = append(startedAts, startedAt)
+		startedAts = append(startedAts, worker.StartedAt)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -1558,16 +1581,55 @@ func (s *Store) ListWorkersPage(ctx context.Context, filter WorkerFilter) ([]Wor
 
 func (s *Store) GetWorker(ctx context.Context, workerID string) (Worker, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, status, max_concurrency, last_heartbeat_at
+		SELECT id, name, queues, capabilities, status, max_concurrency, last_heartbeat_at, started_at, metadata
 		FROM workers
 		WHERE id = $1
 	`, workerID)
 
 	var worker Worker
-	if err := row.Scan(&worker.ID, &worker.Name, &worker.Status, &worker.MaxConcurrency, &worker.LastHeartbeatAt); err != nil {
+	var queues []byte
+	var capabilitiesBytes []byte
+	var metadataBytes []byte
+	if err := row.Scan(&worker.ID, &worker.Name, &queues, &capabilitiesBytes, &worker.Status, &worker.MaxConcurrency, &worker.LastHeartbeatAt, &worker.StartedAt, &metadataBytes); err != nil {
 		return Worker{}, err
 	}
+	worker.Queues = parsePQArray(string(queues))
+	if len(capabilitiesBytes) > 0 {
+		if err := json.Unmarshal(capabilitiesBytes, &worker.Capabilities); err != nil {
+			return Worker{}, fmt.Errorf("unmarshal worker capabilities: %w", err)
+		}
+	}
+	if worker.Capabilities == nil {
+		worker.Capabilities = map[string]any{}
+	}
+	if len(metadataBytes) > 0 {
+		if err := json.Unmarshal(metadataBytes, &worker.Metadata); err != nil {
+			return Worker{}, fmt.Errorf("unmarshal worker metadata: %w", err)
+		}
+	}
+	if worker.Metadata == nil {
+		worker.Metadata = map[string]any{}
+	}
 	return worker, nil
+}
+
+func (s *Store) SetWorkerStatus(ctx context.Context, workerID string, status string) (Worker, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE workers
+		SET status = $2
+		WHERE id = $1
+	`, workerID, status)
+	if err != nil {
+		return Worker{}, fmt.Errorf("update worker status: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Worker{}, fmt.Errorf("worker status rows affected: %w", err)
+	}
+	if affected == 0 {
+		return Worker{}, sql.ErrNoRows
+	}
+	return s.GetWorker(ctx, workerID)
 }
 
 func (s *Store) UpsertTenantQuota(ctx context.Context, tenantID string, maxInflight, maxPendingRuns, maxActiveJobs int, audit *AuditEventInput) (TenantQuota, error) {

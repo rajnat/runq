@@ -110,6 +110,9 @@ func (s *Server) routes() {
 	s.handle("POST /v1/runs/{runID}/redrive", s.handleRedriveRun)
 	s.handle("POST /v1/jobs", s.handleCreateJob)
 	s.handle("GET /v1/workers", s.handleListWorkers)
+	s.handle("GET /v1/workers/{workerID}", s.handleGetWorker)
+	s.handle("POST /v1/workers/{workerID}/drain", s.handleDrainWorker)
+	s.handle("POST /v1/workers/{workerID}/decommission", s.handleDecommissionWorker)
 	s.handle("POST /v1/workers/register", s.handleRegisterWorker)
 	s.handle("POST /v1/workers/{workerID}/poll", s.handlePollWorker)
 	s.handle("POST /v1/workers/{workerID}/heartbeat", s.handleHeartbeatWorker)
@@ -1513,6 +1516,69 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	pagination.NextCursor = nextCursor
 
 	writeJSON(w, http.StatusOK, ListWorkersResponse{Workers: workers, Pagination: pagination})
+}
+
+func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok { return }
+	if principal.Role != roleAdmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin access required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	worker, err := s.store.GetWorker(ctx, r.PathValue("workerID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "worker not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load worker")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"worker": worker})
+}
+
+func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok { return }
+	if principal.Role != roleAdmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin access required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	worker, err := s.store.SetWorkerStatus(ctx, r.PathValue("workerID"), "drained")
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "worker not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to drain worker")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"worker_id": worker.ID, "status": worker.Status})
+}
+
+func (s *Server) handleDecommissionWorker(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok { return }
+	if principal.Role != roleAdmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin access required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	worker, err := s.store.SetWorkerStatus(ctx, r.PathValue("workerID"), "decommissioned")
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "worker not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to decommission worker")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"worker_id": worker.ID, "status": worker.Status})
 }
 
 func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {

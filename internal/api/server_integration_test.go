@@ -602,6 +602,86 @@ func TestListWorkersSupportsCursorPagination(t *testing.T) {
 	}
 }
 
+func TestWorkerDetailAndLifecycleControls(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var registerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "detail-worker",
+		"queues":          []string{"default", "priority"},
+		"capabilities":    map[string]any{"http": true, "shell": true},
+		"max_concurrency": 2,
+		"metadata":        map[string]any{"zone": "us-east-1"},
+	}, &registerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	var detailResp struct {
+		Worker store.Worker `json:"worker"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers/"+registerResp.WorkerID, nil, &detailResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 worker detail, got %d", status)
+	}
+	if detailResp.Worker.Name != "detail-worker" || detailResp.Worker.Status != "healthy" {
+		t.Fatalf("unexpected worker detail: %+v", detailResp.Worker)
+	}
+	if len(detailResp.Worker.Queues) != 2 || !detailResp.Worker.Capabilities["http"].(bool) {
+		t.Fatalf("expected queues/capabilities in worker detail, got %+v", detailResp.Worker)
+	}
+	if detailResp.Worker.Metadata["zone"] != "us-east-1" {
+		t.Fatalf("expected metadata in worker detail, got %+v", detailResp.Worker)
+	}
+
+	var lifecycleResp struct {
+		WorkerID string `json:"worker_id"`
+		Status   string `json:"status"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/"+registerResp.WorkerID+"/drain", nil, &lifecycleResp)
+	if status != http.StatusOK || lifecycleResp.Status != "drained" {
+		t.Fatalf("expected drained worker response, got status=%d body=%+v", status, lifecycleResp)
+	}
+
+	result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "drain-check-job",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	assignments, _, err := jobStore.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim pending runs: %v", err)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("expected drained worker to receive no assignments, got %+v", assignments)
+	}
+	if _, _, err := jobStore.GetRun(ctx, *result.RunID); err != nil {
+		t.Fatalf("get pending run: %v", err)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/"+registerResp.WorkerID+"/decommission", nil, &lifecycleResp)
+	if status != http.StatusOK || lifecycleResp.Status != "decommissioned" {
+		t.Fatalf("expected decommissioned worker response, got status=%d body=%+v", status, lifecycleResp)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers/"+registerResp.WorkerID, nil, &detailResp)
+	if status != http.StatusOK || detailResp.Worker.Status != "decommissioned" {
+		t.Fatalf("expected decommissioned worker detail, got status=%d body=%+v", status, detailResp)
+	}
+}
+
 func TestListAuditEventsSupportsCursorPagination(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)
