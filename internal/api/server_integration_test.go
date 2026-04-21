@@ -534,6 +534,97 @@ func TestListRunsSupportsLimitAndOffset(t *testing.T) {
 	}
 }
 
+func TestListRunsSupportsNewFilters(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	createRun := func(name string) string {
+		t.Helper()
+		var createResp CreateJobResponse
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+			"name":      name,
+			"tenant_id": "tenant-api",
+			"queue":     "api-run-filters",
+			"kind":      "http",
+			"payload":   map[string]any{"name": name},
+		}, &createResp)
+		if status != http.StatusAccepted {
+			t.Fatalf("expected 202 creating job %s, got %d", name, status)
+		}
+		return *createResp.RunID
+	}
+
+	alphaRunID := createRun("run-filter-alpha")
+	time.Sleep(10 * time.Millisecond)
+	betaRunID := createRun("run-filter-beta")
+	time.Sleep(10 * time.Millisecond)
+	gammaRunID := createRun("run-filter-gamma")
+
+	alphaScheduled := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Second)
+	alphaCompleted := alphaScheduled.Add(5 * time.Minute)
+	betaScheduled := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	betaCompleted := betaScheduled.Add(7 * time.Minute)
+	gammaScheduled := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
+	alphaErrorCode := "HTTP_500"
+	betaErrorCode := "TIMEOUT"
+	for _, update := range []struct {
+		id string
+		status string
+		attempt int
+		errorCode *string
+		scheduledAt time.Time
+		completedAt *time.Time
+	}{
+		{alphaRunID, "FAILED", 2, &alphaErrorCode, alphaScheduled, &alphaCompleted},
+		{betaRunID, "FAILED", 3, &betaErrorCode, betaScheduled, &betaCompleted},
+		{gammaRunID, "PENDING", 1, nil, gammaScheduled, nil},
+	} {
+		if _, err := jobStore.DB().ExecContext(ctx, `
+			UPDATE runs
+			SET status = $2,
+			    attempt = $3,
+			    error_code = $4,
+			    scheduled_at = $5,
+			    available_at = $5,
+			    completed_at = $6,
+			    updated_at = NOW()
+			WHERE id = $1
+		`, update.id, update.status, update.attempt, update.errorCode, update.scheduledAt, update.completedAt); err != nil {
+			t.Fatalf("seed run filter fields for %s: %v", update.id, err)
+		}
+	}
+
+	assertRunIDs := func(url string, expected ...string) {
+		t.Helper()
+		var runsResp struct {
+			Runs []store.Run `json:"runs"`
+		}
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, url, nil, &runsResp)
+		if status != http.StatusOK {
+			t.Fatalf("expected 200 listing runs for %s, got %d", url, status)
+		}
+		if len(runsResp.Runs) != len(expected) {
+			t.Fatalf("expected %d runs for %s, got %+v", len(expected), url, runsResp.Runs)
+		}
+		for i, runID := range expected {
+			if runsResp.Runs[i].ID != runID {
+				t.Fatalf("unexpected runs for %s: got %+v expected ids=%+v", url, runsResp.Runs, expected)
+			}
+		}
+	}
+
+	assertRunIDs(httpServer.URL+"/v1/runs?tenant_id=tenant-api&error_code=TIMEOUT", betaRunID)
+	assertRunIDs(httpServer.URL+"/v1/runs?tenant_id=tenant-api&attempt=2", alphaRunID)
+	assertRunIDs(httpServer.URL+"/v1/runs?tenant_id=tenant-api&scheduled_after="+betaScheduled.Add(-1*time.Minute).Format(time.RFC3339)+"&scheduled_before="+betaScheduled.Add(1*time.Minute).Format(time.RFC3339), betaRunID)
+	assertRunIDs(httpServer.URL+"/v1/runs?tenant_id=tenant-api&completed_after="+alphaCompleted.Add(-1*time.Minute).Format(time.RFC3339)+"&completed_before="+alphaCompleted.Add(1*time.Minute).Format(time.RFC3339), alphaRunID)
+	assertRunIDs(httpServer.URL+"/v1/runs?tenant_id=tenant-api&error_code=HTTP_500&attempt=2&completed_before="+alphaCompleted.Add(1*time.Minute).Format(time.RFC3339), alphaRunID)
+}
+
 func TestListJobsSupportsCursorPagination(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)

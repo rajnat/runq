@@ -304,16 +304,22 @@ type RunEvent struct {
 }
 
 type RunFilter struct {
-	TenantID     string
-	Status       string
-	Statuses     []string
-	Queue        string
-	WorkerID     string
-	JobID        string
-	DeadLettered *bool
-	Limit        int
-	Offset       int
-	Cursor       *PageBoundary
+	TenantID        string
+	Status          string
+	Statuses        []string
+	Queue           string
+	WorkerID        string
+	JobID           string
+	ErrorCode       string
+	Attempt         *int
+	ScheduledAfter  *time.Time
+	ScheduledBefore *time.Time
+	CompletedAfter  *time.Time
+	CompletedBefore *time.Time
+	DeadLettered    *bool
+	Limit           int
+	Offset          int
+	Cursor          *PageBoundary
 }
 
 type CancelJobResult struct {
@@ -964,6 +970,30 @@ func (s *Store) ListRunsPage(ctx context.Context, filter RunFilter) ([]Run, bool
 	if filter.JobID != "" {
 		args = append(args, filter.JobID)
 		query += fmt.Sprintf(" AND r.job_id = $%d", len(args))
+	}
+	if filter.ErrorCode != "" {
+		args = append(args, filter.ErrorCode)
+		query += fmt.Sprintf(" AND r.error_code = $%d", len(args))
+	}
+	if filter.Attempt != nil {
+		args = append(args, *filter.Attempt)
+		query += fmt.Sprintf(" AND r.attempt = $%d", len(args))
+	}
+	if filter.ScheduledAfter != nil {
+		args = append(args, *filter.ScheduledAfter)
+		query += fmt.Sprintf(" AND r.scheduled_at >= $%d", len(args))
+	}
+	if filter.ScheduledBefore != nil {
+		args = append(args, *filter.ScheduledBefore)
+		query += fmt.Sprintf(" AND r.scheduled_at <= $%d", len(args))
+	}
+	if filter.CompletedAfter != nil {
+		args = append(args, *filter.CompletedAfter)
+		query += fmt.Sprintf(" AND r.completed_at >= $%d", len(args))
+	}
+	if filter.CompletedBefore != nil {
+		args = append(args, *filter.CompletedBefore)
+		query += fmt.Sprintf(" AND r.completed_at <= $%d", len(args))
 	}
 	if filter.DeadLettered != nil {
 		if *filter.DeadLettered {

@@ -1135,6 +1135,35 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "dead_lettered must be true or false")
 		return
 	}
+	attemptValue, err := parseOptionalInt(r.URL.Query().Get("attempt"), 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "attempt must be zero or greater")
+		return
+	}
+	var attempt *int
+	if strings.TrimSpace(r.URL.Query().Get("attempt")) != "" {
+		attempt = &attemptValue
+	}
+	scheduledAfter, err := parseOptionalTime(r.URL.Query().Get("scheduled_after"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "scheduled_after must be RFC3339")
+		return
+	}
+	scheduledBefore, err := parseOptionalTime(r.URL.Query().Get("scheduled_before"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "scheduled_before must be RFC3339")
+		return
+	}
+	completedAfter, err := parseOptionalTime(r.URL.Query().Get("completed_after"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "completed_after must be RFC3339")
+		return
+	}
+	completedBefore, err := parseOptionalTime(r.URL.Query().Get("completed_before"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "completed_before must be RFC3339")
+		return
+	}
 	limit, err := parseOptionalInt(r.URL.Query().Get("limit"), 1)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
@@ -1152,15 +1181,21 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runs, hasMore, nextBoundary, err := s.store.ListRunsPage(ctx, store.RunFilter{
-		TenantID:     filterTenantID,
-		Statuses:     strings.Split(r.URL.Query().Get("status"), ","),
-		Queue:        r.URL.Query().Get("queue"),
-		WorkerID:     r.URL.Query().Get("worker_id"),
-		JobID:        r.URL.Query().Get("job_id"),
-		DeadLettered: deadLettered,
-		Limit:        limit,
-		Offset:       offset,
-		Cursor:       cursor,
+		TenantID:        filterTenantID,
+		Statuses:        strings.Split(r.URL.Query().Get("status"), ","),
+		Queue:           r.URL.Query().Get("queue"),
+		WorkerID:        r.URL.Query().Get("worker_id"),
+		JobID:           r.URL.Query().Get("job_id"),
+		ErrorCode:       strings.TrimSpace(r.URL.Query().Get("error_code")),
+		Attempt:         attempt,
+		ScheduledAfter:  scheduledAfter,
+		ScheduledBefore: scheduledBefore,
+		CompletedAfter:  completedAfter,
+		CompletedBefore: completedBefore,
+		DeadLettered:    deadLettered,
+		Limit:           limit,
+		Offset:          offset,
+		Cursor:          cursor,
 	})
 	if err != nil {
 		s.logger.Printf("list runs failed: %v", err)
