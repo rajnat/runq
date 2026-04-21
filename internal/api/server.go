@@ -86,6 +86,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/metrics", s.metrics.Handler())
 	s.handle("GET /v1/auth/me", s.handleAuthMe)
 	s.handle("GET /v1/jobs", s.handleListJobs)
+	s.handle("GET /v1/jobs/lookup", s.handleLookupJob)
 	s.handle("GET /v1/jobs/{jobID}", s.handleGetJob)
 	s.handle("PATCH /v1/jobs/{jobID}", s.handleUpdateJob)
 	s.handle("POST /v1/jobs/disable", s.handleBulkDisableJobs)
@@ -350,6 +351,40 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+func (s *Server) handleLookupJob(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot get jobs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	filterTenantID, allowed := authorizedTenantFilter(principal, r.URL.Query().Get("tenant_id"))
+	if !allowed {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+	dedupeKey := strings.TrimSpace(r.URL.Query().Get("dedupe_key"))
+	if dedupeKey == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "dedupe_key is required")
+		return
+	}
+	jobs, err := s.store.ListJobs(ctx, store.JobFilter{TenantID: filterTenantID, DedupeKey: dedupeKey, Limit: 2})
+	if err != nil {
+		s.logger.Printf("lookup job failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load job")
+		return
+	}
+	if len(jobs) == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": jobs[0]})
 }
 
 func (s *Server) selectJobsForBulkOperation(ctx context.Context, principal principal, req BulkJobOperationRequest) ([]store.Job, error) {

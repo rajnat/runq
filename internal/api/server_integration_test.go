@@ -1251,6 +1251,39 @@ func TestListAuditEventsSupportsResourceAndActorFilters(t *testing.T) {
 	assertAuditIDs(httpServer.URL+"/v1/audit/events?actor_id=admin-user&resource_id=worker-1", "worker-1")
 }
 
+func TestLookupJobByDedupeKey(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":       "lookup-job",
+		"tenant_id":  "tenant-api",
+		"queue":      "api-lookup-jobs",
+		"kind":       "http",
+		"dedupe_key": "lookup-dedupe-key",
+		"payload":    map[string]any{"url": "https://example.internal/task"},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202 creating job, got %d", status)
+	}
+
+	var lookupResp struct {
+		Job store.Job `json:"job"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs/lookup?tenant_id=tenant-api&dedupe_key=lookup-dedupe-key", nil, &lookupResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 looking up job by dedupe key, got %d", status)
+	}
+	if lookupResp.Job.ID != createResp.JobID || lookupResp.Job.Name != "lookup-job" {
+		t.Fatalf("unexpected lookup job response: %+v", lookupResp.Job)
+	}
+}
+
 func TestDisableAndEnableJobEndpoints(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)
