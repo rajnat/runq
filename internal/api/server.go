@@ -1686,7 +1686,55 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load worker")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"worker": worker})
+	inflightRuns, err := s.store.ListRuns(ctx, store.RunFilter{WorkerID: worker.ID, Status: "RUNNING", Limit: worker.MaxConcurrency})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load worker inflight runs")
+		return
+	}
+	writeJSON(w, http.StatusOK, WorkerDetailResponse{Worker: s.workerDetail(worker, inflightRuns)})
+}
+
+func (s *Server) workerDetail(worker store.Worker, inflightRuns []store.Run) WorkerDetail {
+	detail := WorkerDetail{Worker: worker}
+	detail.InflightAssignmentCount = len(inflightRuns)
+	if len(inflightRuns) > 0 {
+		detail.InflightRuns = make([]WorkerInflightRun, 0, len(inflightRuns))
+		for _, run := range inflightRuns {
+			detail.InflightRuns = append(detail.InflightRuns, WorkerInflightRun{
+				RunID:          run.ID,
+				JobID:          run.JobID,
+				TenantID:       run.TenantID,
+				Queue:          run.Queue,
+				Status:         run.Status,
+				Attempt:        run.Attempt,
+				StartedAt:      run.StartedAt,
+				LeaseToken:     run.LeaseToken,
+				LeaseExpiresAt: run.LeaseExpiresAt,
+			})
+		}
+	}
+	age := time.Since(worker.LastHeartbeatAt)
+	if age < 0 {
+		age = 0
+	}
+	heartbeatAgeSeconds := int64(age / time.Second)
+	heartbeatDriftSeconds := heartbeatAgeSeconds - int64(s.cfg.WorkerHeartbeatInterval/time.Second)
+	if heartbeatDriftSeconds < 0 {
+		heartbeatDriftSeconds = 0
+	}
+	availableCapacity := worker.MaxConcurrency - len(inflightRuns)
+	if availableCapacity < 0 {
+		availableCapacity = 0
+	}
+	detail.Health = WorkerHealthSummary{
+		HeartbeatAgeSeconds:   heartbeatAgeSeconds,
+		HeartbeatDriftSeconds: heartbeatDriftSeconds,
+		HeartbeatStale:        heartbeatDriftSeconds > 0,
+		InflightAssignments:   len(inflightRuns),
+		AvailableCapacity:     availableCapacity,
+		AtCapacity:            availableCapacity == 0,
+	}
+	return detail
 }
 
 func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {

@@ -884,6 +884,101 @@ func TestReactivateWorkerRejectsDecommissionedState(t *testing.T) {
 	}
 }
 
+func TestWorkerDetailIncludesInflightAssignmentsAndHealthSummary(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var registerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "detail-health-worker",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 2,
+	}, &registerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "detail-health-job",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	assignments, _, err := jobStore.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim pending runs: %v", err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected one assignment, got %+v", assignments)
+	}
+
+	staleAt := time.Now().UTC().Add(-20 * time.Second)
+	if _, err := jobStore.DB().ExecContext(ctx, `UPDATE workers SET last_heartbeat_at = $2 WHERE id = $1`, registerResp.WorkerID, staleAt); err != nil {
+		t.Fatalf("set stale heartbeat: %v", err)
+	}
+
+	var detailResp struct {
+		Worker struct {
+			ID                      string `json:"id"`
+			Status                  string `json:"status"`
+			MaxConcurrency          int    `json:"max_concurrency"`
+			InflightAssignmentCount int    `json:"inflight_assignment_count"`
+			InflightRuns            []struct {
+				RunID      string `json:"run_id"`
+				JobID      string `json:"job_id"`
+				TenantID   string `json:"tenant_id"`
+				Queue      string `json:"queue"`
+				Status     string `json:"status"`
+				LeaseToken int64  `json:"lease_token"`
+			} `json:"inflight_runs"`
+			Health struct {
+				HeartbeatAgeSeconds int64 `json:"heartbeat_age_seconds"`
+				HeartbeatDriftSeconds int64 `json:"heartbeat_drift_seconds"`
+				HeartbeatStale bool `json:"heartbeat_stale"`
+				InflightAssignments int `json:"inflight_assignments"`
+				AvailableCapacity int `json:"available_capacity"`
+				AtCapacity bool `json:"at_capacity"`
+			} `json:"health"`
+		} `json:"worker"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers/"+registerResp.WorkerID, nil, &detailResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 worker detail, got %d", status)
+	}
+	if detailResp.Worker.InflightAssignmentCount != 1 {
+		t.Fatalf("expected one inflight assignment, got %+v", detailResp.Worker)
+	}
+	if len(detailResp.Worker.InflightRuns) != 1 {
+		t.Fatalf("expected one inflight run summary, got %+v", detailResp.Worker.InflightRuns)
+	}
+	if detailResp.Worker.InflightRuns[0].RunID != *result.RunID || detailResp.Worker.InflightRuns[0].JobID != result.JobID || detailResp.Worker.InflightRuns[0].TenantID != "tenant-api" || detailResp.Worker.InflightRuns[0].Queue != "default" || detailResp.Worker.InflightRuns[0].Status != "RUNNING" {
+		t.Fatalf("unexpected inflight run summary: %+v", detailResp.Worker.InflightRuns[0])
+	}
+	if detailResp.Worker.InflightRuns[0].LeaseToken == 0 {
+		t.Fatalf("expected lease token in inflight run summary, got %+v", detailResp.Worker.InflightRuns[0])
+	}
+	if !detailResp.Worker.Health.HeartbeatStale || detailResp.Worker.Health.HeartbeatDriftSeconds <= 0 {
+		t.Fatalf("expected stale health summary, got %+v", detailResp.Worker.Health)
+	}
+	if detailResp.Worker.Health.InflightAssignments != 1 || detailResp.Worker.Health.AvailableCapacity != 1 || detailResp.Worker.Health.AtCapacity {
+		t.Fatalf("unexpected capacity summary: %+v", detailResp.Worker.Health)
+	}
+	if detailResp.Worker.Health.HeartbeatAgeSeconds <= 0 {
+		t.Fatalf("expected positive heartbeat age, got %+v", detailResp.Worker.Health)
+	}
+}
+
 func TestListAuditEventsSupportsCursorPagination(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)

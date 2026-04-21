@@ -143,6 +143,38 @@ type ListWorkersResponse struct {
 	Pagination PaginationMeta `json:"pagination"`
 }
 
+type WorkerInflightRun struct {
+	RunID          string     `json:"run_id"`
+	JobID          string     `json:"job_id"`
+	TenantID       string     `json:"tenant_id"`
+	Queue          string     `json:"queue"`
+	Status         string     `json:"status"`
+	Attempt        int        `json:"attempt"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	LeaseToken     int64      `json:"lease_token"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+}
+
+type WorkerHealthSummary struct {
+	HeartbeatAgeSeconds   int64 `json:"heartbeat_age_seconds"`
+	HeartbeatDriftSeconds int64 `json:"heartbeat_drift_seconds"`
+	HeartbeatStale        bool  `json:"heartbeat_stale"`
+	InflightAssignments   int   `json:"inflight_assignments"`
+	AvailableCapacity     int   `json:"available_capacity"`
+	AtCapacity            bool  `json:"at_capacity"`
+}
+
+type WorkerDetail struct {
+	store.Worker
+	InflightAssignmentCount int                 `json:"inflight_assignment_count"`
+	InflightRuns            []WorkerInflightRun `json:"inflight_runs,omitempty"`
+	Health                  WorkerHealthSummary `json:"health"`
+}
+
+type WorkerDetailResponse struct {
+	Worker WorkerDetail `json:"worker"`
+}
+
 type BulkRunOperationRequest struct {
 	RunIDs       []string `json:"run_ids,omitempty"`
 	TenantID     string   `json:"tenant_id,omitempty"`
