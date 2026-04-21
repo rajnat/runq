@@ -1,6 +1,23 @@
 GO ?= go
 COMPOSE ?= docker-compose
 
+.PHONY: help
+help:
+	@printf "Available targets:\n"
+	@printf "  build         Build all Go packages\n"
+	@printf "  migrate       Apply database migrations\n"
+	@printf "  run-api       Run the API server\n"
+	@printf "  run-scheduler Run the scheduler\n"
+	@printf "  run-worker    Run the sample worker\n"
+	@printf "  run-reaper    Run the reaper\n"
+	@printf "  fmt           Format Go code\n"
+	@printf "  test          Run the full test suite\n"
+	@printf "  test-serial   Run the reliable serial test suite\n"
+	@printf "  up            Start local Docker dependencies\n"
+	@printf "  down          Stop local Docker dependencies\n"
+	@printf "  demo          Run demo script\n"
+	@printf "  e2e-smoke     Run end-to-end smoke script\n"
+
 .PHONY: build
 build:
 	$(GO) build ./...
@@ -32,6 +49,10 @@ fmt:
 .PHONY: test
 test:
 	$(GO) test ./...
+
+.PHONY: test-serial
+test-serial:
+	$(GO) test -p 1 ./...
 
 .PHONY: up
 up:
