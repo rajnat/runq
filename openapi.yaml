@@ -1,0 +1,787 @@
+openapi: 3.1.0
+info:
+  title: runq API
+  version: 0.1.0
+  description: |
+    OpenAPI description for the current runq HTTP API.
+
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: jobs
+  - name: runs
+  - name: workers
+  - name: quotas
+  - name: audit
+
+paths:
+  /v1/jobs:
+    get:
+      tags: [jobs]
+      summary: List jobs
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - name: queue
+          in: query
+          schema: { type: string }
+        - name: kind
+          in: query
+          schema: { type: string }
+        - name: name
+          in: query
+          schema: { type: string }
+        - name: dedupe_key
+          in: query
+          schema: { type: string }
+        - name: concurrency_key
+          in: query
+          schema: { type: string }
+        - name: disabled
+          in: query
+          schema: { type: boolean }
+        - name: paused
+          in: query
+          schema: { type: boolean }
+        - $ref: '#/components/parameters/CreatedAfter'
+        - $ref: '#/components/parameters/CreatedBefore'
+        - $ref: '#/components/parameters/UpdatedAfter'
+        - $ref: '#/components/parameters/UpdatedBefore'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Job list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListJobsResponse'
+    post:
+      tags: [jobs]
+      summary: Create a job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJobRequest'
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateJobResponse'
+
+  /v1/jobs/lookup:
+    get:
+      tags: [jobs]
+      summary: Lookup a job by tenant and dedupe key
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - name: dedupe_key
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Job lookup result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job:
+                    $ref: '#/components/schemas/Job'
+                required: [job]
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /v1/jobs/{jobID}:
+    get:
+      tags: [jobs]
+      summary: Get a job by ID
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200':
+          description: Job detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job:
+                    $ref: '#/components/schemas/Job'
+                required: [job]
+    patch:
+      tags: [jobs]
+      summary: Patch mutable job fields
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Updated job
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job:
+                    $ref: '#/components/schemas/Job'
+                required: [job]
+
+  /v1/jobs/disable:
+    post:
+      tags: [jobs]
+      summary: Bulk disable jobs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkJobOperationRequest'
+      responses:
+        '200':
+          description: Dry-run result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkJobOperationResponse'
+        '202':
+          description: Accepted result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkJobOperationResponse'
+
+  /v1/jobs/enable:
+    post:
+      tags: [jobs]
+      summary: Bulk enable jobs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkJobOperationRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/jobs/pause:
+    post:
+      tags: [jobs]
+      summary: Bulk pause jobs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkJobOperationRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/jobs/resume:
+    post:
+      tags: [jobs]
+      summary: Bulk resume jobs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkJobOperationRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/runs:
+    get:
+      tags: [runs]
+      summary: List runs
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - name: status
+          in: query
+          schema: { type: string, description: Comma-separated statuses }
+        - name: queue
+          in: query
+          schema: { type: string }
+        - name: worker_id
+          in: query
+          schema: { type: string }
+        - name: job_id
+          in: query
+          schema: { type: string }
+        - name: dead_lettered
+          in: query
+          schema: { type: boolean }
+        - name: error_code
+          in: query
+          schema: { type: string }
+        - name: attempt
+          in: query
+          schema: { type: integer }
+        - name: scheduled_after
+          in: query
+          schema: { type: string, format: date-time }
+        - name: scheduled_before
+          in: query
+          schema: { type: string, format: date-time }
+        - name: completed_after
+          in: query
+          schema: { type: string, format: date-time }
+        - name: completed_before
+          in: query
+          schema: { type: string, format: date-time }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Run list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListRunsResponse'
+
+  /v1/runs/{runID}:
+    get:
+      tags: [runs]
+      summary: Get a run by ID
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          description: Run detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run:
+                    $ref: '#/components/schemas/Run'
+                  events:
+                    type: array
+                    items: { type: object }
+                required: [run, events]
+
+  /v1/runs/requeue:
+    post:
+      tags: [runs]
+      summary: Bulk requeue runs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkRunOperationRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/runs/redrive:
+    post:
+      tags: [runs]
+      summary: Bulk redrive runs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkRunOperationRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/runs/cancel:
+    post:
+      tags: [runs]
+      summary: Bulk cancel runs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkRunOperationRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/workers:
+    get:
+      tags: [workers]
+      summary: List workers
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: queue
+          in: query
+          schema: { type: string }
+        - name: capability
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Worker list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListWorkersResponse'
+
+  /v1/workers/{workerID}:
+    get:
+      tags: [workers]
+      summary: Get worker detail
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+      responses:
+        '200':
+          description: Worker detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerDetailResponse'
+
+  /v1/workers/{workerID}/drain:
+    post:
+      tags: [workers]
+      summary: Drain a worker
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/workers/{workerID}/reactivate:
+    post:
+      tags: [workers]
+      summary: Reactivate a drained worker
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /v1/workers/{workerID}/decommission:
+    post:
+      tags: [workers]
+      summary: Decommission a worker
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/workers/register:
+    post:
+      tags: [workers]
+      summary: Register a worker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '201': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/tenants/quotas:
+    get:
+      tags: [quotas]
+      summary: List tenant quotas
+      responses:
+        '200':
+          description: Tenant quotas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant_quotas:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TenantQuota'
+
+  /v1/tenants/{tenantID}/quota:
+    put:
+      tags: [quotas]
+      summary: Upsert tenant quota
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertTenantQuotaRequest'
+      responses:
+        '200':
+          description: Upserted quota
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantQuota'
+
+  /v1/audit/events:
+    get:
+      tags: [audit]
+      summary: List audit events
+      parameters:
+        - $ref: '#/components/parameters/TenantID'
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: resource_type
+          in: query
+          schema: { type: string }
+        - name: resource_id
+          in: query
+          schema: { type: string }
+        - name: actor_id
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Audit event list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListAuditEventsResponse'
+
+components:
+  parameters:
+    TenantID:
+      name: tenant_id
+      in: query
+      schema: { type: string }
+    JobID:
+      name: jobID
+      in: path
+      required: true
+      schema: { type: string }
+    RunID:
+      name: runID
+      in: path
+      required: true
+      schema: { type: string }
+    WorkerID:
+      name: workerID
+      in: path
+      required: true
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    CreatedAfter:
+      name: created_after
+      in: query
+      schema: { type: string, format: date-time }
+    CreatedBefore:
+      name: created_before
+      in: query
+      schema: { type: string, format: date-time }
+    UpdatedAfter:
+      name: updated_after
+      in: query
+      schema: { type: string, format: date-time }
+    UpdatedBefore:
+      name: updated_before
+      in: query
+      schema: { type: string, format: date-time }
+
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    JSONGeneric:
+      description: Generic JSON response
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+          required: [code, message]
+      required: [error]
+
+    PaginationMeta:
+      type: object
+      properties:
+        limit: { type: integer }
+        offset: { type: integer }
+        returned: { type: integer }
+        has_more: { type: boolean }
+        next_offset: { type: integer, nullable: true }
+        next_cursor: { type: string, nullable: true }
+
+    Job:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        tenant_id: { type: string }
+        queue: { type: string }
+        kind: { type: string }
+        payload: { type: object, additionalProperties: true }
+        schedule_type: { type: string }
+        cron_expr: { type: string, nullable: true }
+        timezone: { type: string, nullable: true }
+        concurrency_key: { type: string, nullable: true }
+        priority: { type: integer }
+        max_retries: { type: integer }
+        timeout_seconds: { type: integer }
+        retry_backoff_base_seconds: { type: integer }
+        paused_at: { type: string, format: date-time, nullable: true }
+        disabled_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Run:
+      type: object
+      properties:
+        id: { type: string }
+        job_id: { type: string }
+        job_name: { type: string }
+        tenant_id: { type: string }
+        queue: { type: string }
+        kind: { type: string }
+        schedule_type: { type: string }
+        job_disabled: { type: boolean }
+        status: { type: string }
+        attempt: { type: integer }
+        scheduled_at: { type: string, format: date-time }
+        available_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+        worker_id: { type: string, nullable: true }
+        lease_token: { type: integer }
+        lease_expires_at: { type: string, format: date-time, nullable: true }
+        last_heartbeat_at: { type: string, format: date-time, nullable: true }
+        dead_lettered_at: { type: string, format: date-time, nullable: true }
+        dead_letter_reason: { type: string, nullable: true }
+        result: { type: object, additionalProperties: true }
+        error_code: { type: string, nullable: true }
+        error_message: { type: string, nullable: true }
+
+    Worker:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        queues:
+          type: array
+          items: { type: string }
+        capabilities:
+          type: object
+          additionalProperties: true
+        status: { type: string }
+        max_concurrency: { type: integer }
+        last_heartbeat_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        metadata:
+          type: object
+          additionalProperties: true
+
+    WorkerDetailResponse:
+      type: object
+      properties:
+        worker:
+          type: object
+          allOf:
+            - $ref: '#/components/schemas/Worker'
+            - type: object
+              properties:
+                inflight_assignment_count: { type: integer }
+                inflight_runs:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      run_id: { type: string }
+                      job_id: { type: string }
+                      tenant_id: { type: string }
+                      queue: { type: string }
+                      status: { type: string }
+                      attempt: { type: integer }
+                      started_at: { type: string, format: date-time, nullable: true }
+                      lease_token: { type: integer }
+                      lease_expires_at: { type: string, format: date-time, nullable: true }
+                health:
+                  type: object
+                  properties:
+                    heartbeat_age_seconds: { type: integer }
+                    heartbeat_drift_seconds: { type: integer }
+                    heartbeat_stale: { type: boolean }
+                    inflight_assignments: { type: integer }
+                    available_capacity: { type: integer }
+                    at_capacity: { type: boolean }
+
+    TenantQuota:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        max_inflight: { type: integer }
+        max_pending_runs: { type: integer }
+        max_active_jobs: { type: integer }
+        updated_at: { type: string, format: date-time }
+
+    UpsertTenantQuotaRequest:
+      type: object
+      properties:
+        max_inflight: { type: integer }
+        max_pending_runs: { type: integer }
+        max_active_jobs: { type: integer }
+      required: [max_inflight, max_pending_runs, max_active_jobs]
+
+    CreateJobRequest:
+      type: object
+      properties:
+        name: { type: string }
+        tenant_id: { type: string }
+        queue: { type: string }
+        kind: { type: string }
+        payload: { type: object, additionalProperties: true }
+        dedupe_key: { type: string }
+        concurrency_key: { type: string }
+        priority: { type: integer }
+        max_retries: { type: integer }
+        timeout_seconds: { type: integer }
+        retry_backoff_base_seconds: { type: integer }
+        schedule:
+          type: object
+          properties:
+            type: { type: string }
+            cron: { type: string }
+            timezone: { type: string }
+            run_at: { type: string, format: date-time }
+      required: [name, queue, kind, payload]
+
+    CreateJobResponse:
+      type: object
+      properties:
+        job_id: { type: string }
+        run_id: { type: string, nullable: true }
+        status: { type: string }
+
+    ListJobsResponse:
+      type: object
+      properties:
+        jobs:
+          type: array
+          items: { $ref: '#/components/schemas/Job' }
+        pagination: { $ref: '#/components/schemas/PaginationMeta' }
+
+    ListRunsResponse:
+      type: object
+      properties:
+        runs:
+          type: array
+          items: { $ref: '#/components/schemas/Run' }
+        pagination: { $ref: '#/components/schemas/PaginationMeta' }
+
+    ListWorkersResponse:
+      type: object
+      properties:
+        workers:
+          type: array
+          items: { $ref: '#/components/schemas/Worker' }
+        pagination: { $ref: '#/components/schemas/PaginationMeta' }
+
+    ListAuditEventsResponse:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              event_time: { type: string, format: date-time }
+              actor_role: { type: string }
+              actor_id: { type: string, nullable: true }
+              action: { type: string }
+              resource_type: { type: string }
+              resource_id: { type: string }
+              tenant_id: { type: string, nullable: true }
+              payload: { type: object, additionalProperties: true }
+        pagination: { $ref: '#/components/schemas/PaginationMeta' }
+
+    BulkRunOperationRequest:
+      type: object
+      properties:
+        run_ids:
+          type: array
+          items: { type: string }
+        tenant_id: { type: string }
+        job_id: { type: string }
+        status:
+          type: array
+          items: { type: string }
+        dead_lettered: { type: boolean }
+        dry_run: { type: boolean }
+
+    BulkJobOperationRequest:
+      type: object
+      properties:
+        job_ids:
+          type: array
+          items: { type: string }
+        tenant_id: { type: string }
+        queue: { type: string }
+        kind: { type: string }
+        paused: { type: boolean }
+        disabled: { type: boolean }
+        dry_run: { type: boolean }
+
+    BulkJobOperationResponse:
+      type: object
+      properties:
+        count: { type: integer }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              job_id: { type: string }
+              status: { type: string }
+              error_code: { type: string, nullable: true }
+              error_message: { type: string, nullable: true }

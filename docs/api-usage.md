@@ -20,6 +20,26 @@ Examples:
 - tenant token can only see and mutate that tenant's jobs/runs
 - worker token can only operate as the configured worker identity
 
+## Tenancy and quotas
+
+Tenancy is explicit in the API today.
+
+Rules:
+- tenant-scoped tokens can only access their own tenant resources
+- admin tokens can operate across tenants
+- many list endpoints accept `tenant_id`, but the API enforces scope before querying or returning data
+
+Quota APIs:
+- `GET /v1/tenants/quotas`
+- `PUT /v1/tenants/{tenantID}/quota`
+
+Current quota dimensions:
+- `max_inflight`
+- `max_pending_runs`
+- `max_active_jobs`
+
+Quota effects show up primarily during job admission and scheduler assignment.
+
 ## Jobs
 
 ### Create a once job
@@ -130,6 +150,11 @@ Bulk job lifecycle requests support:
 - filter selection (`tenant_id`, `queue`, `kind`, `paused`, `disabled`)
 - `dry_run`
 
+Bulk lifecycle semantics:
+- successful items are returned alongside skipped items
+- skipped items carry explicit `error_code` and `error_message`
+- dry-run returns `would_change` / `would_skip` without mutation
+
 ## Runs
 
 ### List runs
@@ -170,6 +195,11 @@ Bulk endpoints:
 - `POST /v1/runs/redrive`
 
 Bulk run requests support `dry_run`.
+
+Bulk run semantics:
+- partial success is expected and returned item-by-item
+- dry-run returns `would_accept` / `would_cancel` / `would_skip`
+- real execution returns accepted/canceled items and explicit skip reasons
 
 ## Workers
 
@@ -244,9 +274,9 @@ Response pagination shape:
 
 For stable deep pagination, prefer cursor mode.
 
-## Error shape
+## Stable error contract
 
-Errors return:
+Errors return a stable envelope:
 
 ```json
 {
@@ -256,3 +286,16 @@ Errors return:
   }
 }
 ```
+
+Common codes in the current API include:
+- `INVALID_ARGUMENT`
+- `INVALID_JSON`
+- `FORBIDDEN`
+- `NOT_FOUND`
+- `CONFLICT`
+- `INTERNAL`
+- domain-specific codes like `WORKER_REACTIVATE_CONFLICT`, `JOB_DISABLE_CONFLICT`, `RUN_REQUEUE_CONFLICT`, `TENANT_QUOTA_EXCEEDED`
+
+## Example requests and responses
+
+See `docs/api-examples.md` for copy/paste examples across jobs, runs, workers, quotas, and audit endpoints.
