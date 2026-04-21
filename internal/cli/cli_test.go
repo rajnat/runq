@@ -275,6 +275,90 @@ func TestRunRunsCommands(t *testing.T) {
 	}
 }
 
+func TestRunWorkerAndQuotaCommands(t *testing.T) {
+	jobStore := openTestStoreForCLI(t)
+	resetTablesForCLI(t, jobStore)
+	httpServer := newCLIAdminTestServer(t, jobStore)
+	defer httpServer.Close()
+
+	newAdminApp := func() (*App, *bytes.Buffer, *bytes.Buffer) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		return New(AppConfig{BaseURL: httpServer.URL, Token: "admin-token"}, &stdout, &stderr), &stdout, &stderr
+	}
+
+	ctx := context.Background()
+
+	app, stdout, stderr := newAdminApp()
+	if err := app.Run([]string{"workers", "register", `{"name":"cli-worker","queues":["default"],"capabilities":{"http":true},"max_concurrency":2,"metadata":{"zone":"us-east-1"}}`}); err != nil {
+		t.Fatalf("workers register: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"worker_id"`) {
+		t.Fatalf("expected workers register output to include worker id, got %q", stdout.String())
+	}
+
+	registeredWorker, err := jobStore.GetWorker(ctx, extractWorkerID(t, stdout.Bytes()))
+	if err != nil {
+		t.Fatalf("get registered worker: %v", err)
+	}
+
+	app, stdout, stderr = newAdminApp()
+	if err := app.Run([]string{"workers", "list", "--queue", "default"}); err != nil {
+		t.Fatalf("workers list: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"workers"`) || !strings.Contains(stdout.String(), registeredWorker.ID) {
+		t.Fatalf("expected workers list output to include worker, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newAdminApp()
+	if err := app.Run([]string{"workers", "get", registeredWorker.ID}); err != nil {
+		t.Fatalf("workers get: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"id":"`+registeredWorker.ID+`"`) {
+		t.Fatalf("expected workers get output to include worker id, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newAdminApp()
+	if err := app.Run([]string{"workers", "drain", registeredWorker.ID}); err != nil {
+		t.Fatalf("workers drain: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"status":"drained"`) {
+		t.Fatalf("expected workers drain output to include drained status, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newAdminApp()
+	if err := app.Run([]string{"workers", "reactivate", registeredWorker.ID}); err != nil {
+		t.Fatalf("workers reactivate: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"status":"healthy"`) {
+		t.Fatalf("expected workers reactivate output to include healthy status, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newAdminApp()
+	if err := app.Run([]string{"workers", "decommission", registeredWorker.ID}); err != nil {
+		t.Fatalf("workers decommission: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"status":"decommissioned"`) {
+		t.Fatalf("expected workers decommission output to include decommissioned status, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newAdminApp()
+	if err := app.Run([]string{"quotas", "set", "tenant-api", `{"max_inflight":7,"max_pending_runs":11,"max_active_jobs":13}`}); err != nil {
+		t.Fatalf("quotas set: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"tenant_id":"tenant-api"`) {
+		t.Fatalf("expected quotas set output to include tenant id, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newAdminApp()
+	if err := app.Run([]string{"quotas", "list"}); err != nil {
+		t.Fatalf("quotas list: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"tenant-api"`) {
+		t.Fatalf("expected quotas list output to include tenant, got %q", stdout.String())
+	}
+}
+
 func openTestStoreForCLI(t *testing.T) *store.Store {
 	t.Helper()
 	dbURL := os.Getenv("RUNQ_DATABASE_URL")
@@ -302,6 +386,30 @@ func newCLITestServer(t *testing.T, jobStore *store.Store) *httptest.Server {
 		t.Fatalf("new server: %v", err)
 	}
 	return httptest.NewServer(server.MuxForTests())
+}
+
+func newCLIAdminTestServer(t *testing.T, jobStore *store.Store) *httptest.Server {
+	t.Helper()
+	server, err := apiPkg.NewServer(config.APIConfig{
+		Address:                 ":0",
+		DBConnString:            "",
+		AuthTokens:              "admin-token:admin,tenant-token:tenant:tenant-api",
+		WorkerHeartbeatInterval: 5 * time.Second,
+		WorkerLeaseDuration:     30 * time.Second,
+	}, log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return httptest.NewServer(server.MuxForTests())
+}
+
+func extractWorkerID(t *testing.T, payload []byte) string {
+	t.Helper()
+	var resp apiPkg.RegisterWorkerResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("unmarshal worker register response: %v payload=%q", err, string(payload))
+	}
+	return resp.WorkerID
 }
 
 func resetTablesForCLI(t *testing.T, jobStore *store.Store) {

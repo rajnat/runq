@@ -66,9 +66,10 @@ func (a *App) Run(args []string) error {
 		return a.runJobs(args[1:])
 	case "runs":
 		return a.runRuns(args[1:])
-	case "workers", "quotas":
-		_, _ = fmt.Fprintf(a.stdout, "%s commands not implemented yet\n", args[0])
-		return nil
+	case "workers":
+		return a.runWorkers(args[1:])
+	case "quotas":
+		return a.runQuotas(args[1:])
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
@@ -269,6 +270,89 @@ func (a *App) runRuns(args []string) error {
 		return a.writeJSON(resp)
 	default:
 		return fmt.Errorf("unknown runs command: %s", args[0])
+	}
+}
+
+func (a *App) runWorkers(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: runq workers <list|get|register|drain|reactivate|decommission>")
+	}
+	switch args[0] {
+	case "list":
+		query := url.Values{}
+		for i := 1; i < len(args); i += 2 {
+			if i+1 >= len(args) || !strings.HasPrefix(args[i], "--") {
+				return errors.New("usage: runq workers list [--queue <queue>] [--status <status>] [--capability <capability>]")
+			}
+			query.Set(strings.ReplaceAll(strings.TrimPrefix(args[i], "--"), "-", "_"), args[i+1])
+		}
+		var resp apiPkg.ListWorkersResponse
+		if err := a.getJSON(context.Background(), "/v1/workers?"+query.Encode(), &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "get":
+		if len(args) != 2 {
+			return errors.New("usage: runq workers get <worker-id>")
+		}
+		var resp map[string]any
+		if err := a.getJSON(context.Background(), "/v1/workers/"+args[1], &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "register":
+		if len(args) != 2 {
+			return errors.New("usage: runq workers register <json-payload>")
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(args[1]), &payload); err != nil {
+			return err
+		}
+		var resp apiPkg.RegisterWorkerResponse
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/workers/register", payload, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "drain", "reactivate", "decommission":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: runq workers %s <worker-id>", args[0])
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/workers/"+args[1]+"/"+args[0], nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	default:
+		return fmt.Errorf("unknown workers command: %s", args[0])
+	}
+}
+
+func (a *App) runQuotas(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: runq quotas <list|set>")
+	}
+	switch args[0] {
+	case "list":
+		var resp map[string]any
+		if err := a.getJSON(context.Background(), "/v1/tenants/quotas", &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "set":
+		if len(args) != 3 {
+			return errors.New("usage: runq quotas set <tenant-id> <json-payload>")
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(args[2]), &payload); err != nil {
+			return err
+		}
+		var resp apiPkg.TenantQuotaResponse
+		if err := a.doJSON(context.Background(), http.MethodPut, "/v1/tenants/"+args[1]+"/quota", payload, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	default:
+		return fmt.Errorf("unknown quotas command: %s", args[0])
 	}
 }
 
