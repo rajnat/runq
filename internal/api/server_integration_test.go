@@ -400,6 +400,93 @@ func TestListJobsSupportsLimitAndOffset(t *testing.T) {
 	}
 }
 
+func TestListJobsSupportsNewFilters(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	createJob := func(name string) string {
+		t.Helper()
+		var createResp CreateJobResponse
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+			"name":      name,
+			"tenant_id": "tenant-api",
+			"queue":     "api-job-filters",
+			"kind":      "http",
+			"payload":   map[string]any{"name": name},
+		}, &createResp)
+		if status != http.StatusAccepted {
+			t.Fatalf("expected 202 creating job %s, got %d", name, status)
+		}
+		return createResp.JobID
+	}
+
+	alphaID := createJob("filter-job-alpha")
+	time.Sleep(10 * time.Millisecond)
+	betaID := createJob("filter-job-beta")
+	time.Sleep(10 * time.Millisecond)
+	gammaID := createJob("filter-job-gamma")
+
+	alphaCreated := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Second)
+	alphaUpdated := alphaCreated.Add(30 * time.Minute)
+	betaCreated := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	betaUpdated := betaCreated.Add(20 * time.Minute)
+	gammaCreated := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
+	gammaUpdated := gammaCreated.Add(10 * time.Minute)
+	for _, update := range []struct {
+		id string
+		dedupeKey string
+		concurrencyKey string
+		createdAt time.Time
+		updatedAt time.Time
+	}{
+		{alphaID, "dedupe-alpha", "account-a", alphaCreated, alphaUpdated},
+		{betaID, "dedupe-beta", "account-b", betaCreated, betaUpdated},
+		{gammaID, "dedupe-shared", "account-shared", gammaCreated, gammaUpdated},
+	} {
+		if _, err := jobStore.DB().ExecContext(ctx, `
+			UPDATE jobs
+			SET dedupe_key = $2,
+			    concurrency_key = $3,
+			    created_at = $4,
+			    updated_at = $5
+			WHERE id = $1
+		`, update.id, update.dedupeKey, update.concurrencyKey, update.createdAt, update.updatedAt); err != nil {
+			t.Fatalf("seed job filter fields for %s: %v", update.id, err)
+		}
+	}
+
+	assertJobIDs := func(url string, expected ...string) {
+		t.Helper()
+		var jobsResp struct {
+			Jobs []store.Job `json:"jobs"`
+		}
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, url, nil, &jobsResp)
+		if status != http.StatusOK {
+			t.Fatalf("expected 200 listing jobs for %s, got %d", url, status)
+		}
+		if len(jobsResp.Jobs) != len(expected) {
+			t.Fatalf("expected %d jobs for %s, got %+v", len(expected), url, jobsResp.Jobs)
+		}
+		for i, jobID := range expected {
+			if jobsResp.Jobs[i].ID != jobID {
+				t.Fatalf("unexpected jobs for %s: got %+v expected ids=%+v", url, jobsResp.Jobs, expected)
+			}
+		}
+	}
+
+	assertJobIDs(httpServer.URL+"/v1/jobs?tenant_id=tenant-api&name=filter-job-beta", betaID)
+	assertJobIDs(httpServer.URL+"/v1/jobs?tenant_id=tenant-api&dedupe_key=dedupe-shared", gammaID)
+	assertJobIDs(httpServer.URL+"/v1/jobs?tenant_id=tenant-api&concurrency_key=account-a", alphaID)
+	assertJobIDs(httpServer.URL+"/v1/jobs?tenant_id=tenant-api&created_after="+betaCreated.Add(-1*time.Minute).Format(time.RFC3339)+"&created_before="+betaCreated.Add(1*time.Minute).Format(time.RFC3339), betaID)
+	assertJobIDs(httpServer.URL+"/v1/jobs?tenant_id=tenant-api&updated_after="+gammaUpdated.Add(-1*time.Minute).Format(time.RFC3339)+"&updated_before="+gammaUpdated.Add(1*time.Minute).Format(time.RFC3339), gammaID)
+	assertJobIDs(httpServer.URL+"/v1/jobs?tenant_id=tenant-api&dedupe_key=dedupe-beta&created_after="+betaCreated.Add(-1*time.Minute).Format(time.RFC3339)+"&updated_before="+betaUpdated.Add(1*time.Minute).Format(time.RFC3339), betaID)
+}
+
 func TestListRunsSupportsLimitAndOffset(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)

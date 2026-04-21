@@ -257,6 +257,26 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+	createdAfter, err := parseOptionalTime(r.URL.Query().Get("created_after"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "created_after must be RFC3339")
+		return
+	}
+	createdBefore, err := parseOptionalTime(r.URL.Query().Get("created_before"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "created_before must be RFC3339")
+		return
+	}
+	updatedAfter, err := parseOptionalTime(r.URL.Query().Get("updated_after"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "updated_after must be RFC3339")
+		return
+	}
+	updatedBefore, err := parseOptionalTime(r.URL.Query().Get("updated_before"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "updated_before must be RFC3339")
+		return
+	}
 
 	filterTenantID, allowed := authorizedTenantFilter(principal, r.URL.Query().Get("tenant_id"))
 	if !allowed {
@@ -265,14 +285,21 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jobs, hasMore, nextBoundary, err := s.store.ListJobsPage(ctx, store.JobFilter{
-		TenantID: filterTenantID,
-		Queue:    r.URL.Query().Get("queue"),
-		Kind:     r.URL.Query().Get("kind"),
-		Disabled: disabled,
-		Paused:   paused,
-		Limit:    limit,
-		Offset:   offset,
-		Cursor:   cursor,
+		TenantID:       filterTenantID,
+		Queue:          r.URL.Query().Get("queue"),
+		Kind:           r.URL.Query().Get("kind"),
+		Name:           strings.TrimSpace(r.URL.Query().Get("name")),
+		DedupeKey:      strings.TrimSpace(r.URL.Query().Get("dedupe_key")),
+		ConcurrencyKey: strings.TrimSpace(r.URL.Query().Get("concurrency_key")),
+		CreatedAfter:   createdAfter,
+		CreatedBefore:  createdBefore,
+		UpdatedAfter:   updatedAfter,
+		UpdatedBefore:  updatedBefore,
+		Disabled:       disabled,
+		Paused:         paused,
+		Limit:          limit,
+		Offset:         offset,
+		Cursor:         cursor,
 	})
 	if err != nil {
 		s.logger.Printf("list jobs failed: %v", err)

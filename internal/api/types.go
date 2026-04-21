@@ -545,6 +545,19 @@ func parseOptionalInt(value string, minimum int) (int, error) {
 	return parsed, nil
 }
 
+func parseOptionalTime(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, errors.New("invalid timestamp")
+	}
+	utc := parsed.UTC()
+	return &utc, nil
+}
+
 func scheduleTypePtr(schedule *Schedule) *string {
 	if schedule == nil {
 		return nil

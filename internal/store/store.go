@@ -72,14 +72,21 @@ type Job struct {
 }
 
 type JobFilter struct {
-	TenantID string
-	Queue    string
-	Kind     string
-	Disabled *bool
-	Paused   *bool
-	Limit    int
-	Offset   int
-	Cursor   *PageBoundary
+	TenantID       string
+	Queue          string
+	Kind           string
+	Name           string
+	DedupeKey      string
+	ConcurrencyKey string
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
+	UpdatedAfter   *time.Time
+	UpdatedBefore  *time.Time
+	Disabled       *bool
+	Paused         *bool
+	Limit          int
+	Offset         int
+	Cursor         *PageBoundary
 }
 
 type PageBoundary struct {
@@ -596,6 +603,34 @@ func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool
 		args = append(args, filter.Kind)
 		query += fmt.Sprintf(" AND j.kind = $%d", len(args))
 	}
+	if filter.Name != "" {
+		args = append(args, filter.Name)
+		query += fmt.Sprintf(" AND j.name = $%d", len(args))
+	}
+	if filter.DedupeKey != "" {
+		args = append(args, filter.DedupeKey)
+		query += fmt.Sprintf(" AND j.dedupe_key = $%d", len(args))
+	}
+	if filter.ConcurrencyKey != "" {
+		args = append(args, filter.ConcurrencyKey)
+		query += fmt.Sprintf(" AND j.concurrency_key = $%d", len(args))
+	}
+	if filter.CreatedAfter != nil {
+		args = append(args, *filter.CreatedAfter)
+		query += fmt.Sprintf(" AND j.created_at >= $%d", len(args))
+	}
+	if filter.CreatedBefore != nil {
+		args = append(args, *filter.CreatedBefore)
+		query += fmt.Sprintf(" AND j.created_at <= $%d", len(args))
+	}
+	if filter.UpdatedAfter != nil {
+		args = append(args, *filter.UpdatedAfter)
+		query += fmt.Sprintf(" AND j.updated_at >= $%d", len(args))
+	}
+	if filter.UpdatedBefore != nil {
+		args = append(args, *filter.UpdatedBefore)
+		query += fmt.Sprintf(" AND j.updated_at <= $%d", len(args))
+	}
 	if filter.Disabled != nil {
 		if *filter.Disabled {
 			query += " AND j.disabled_at IS NOT NULL"
@@ -664,18 +699,17 @@ func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool
 			job.ConcurrencyKey = &value
 		}
 		if pausedAt.Valid {
-			value := pausedAt.Time
+			value := pausedAt.Time.UTC()
 			job.PausedAt = &value
 		}
 		if disabledAt.Valid {
-			value := disabledAt.Time
+			value := disabledAt.Time.UTC()
 			job.DisabledAt = &value
 		}
 		jobs = append(jobs, job)
 	}
-
 	if err := rows.Err(); err != nil {
-		return nil, false, nil, fmt.Errorf("rows error: %w", err)
+		return nil, false, nil, fmt.Errorf("jobs rows error: %w", err)
 	}
 
 	hasMore := len(jobs) > limit
@@ -686,7 +720,6 @@ func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool
 	if hasMore && len(jobs) > 0 {
 		next = &PageBoundary{CreatedAt: jobs[len(jobs)-1].CreatedAt, ID: jobs[len(jobs)-1].ID}
 	}
-
 	return jobs, hasMore, next, nil
 }
 
