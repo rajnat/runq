@@ -387,6 +387,18 @@ func (s *Server) handleBulkDisableJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]BulkJobOperationItem, 0, len(jobs))
 	for _, job := range jobs {
+		if req.DryRun {
+			item := BulkJobOperationItem{JobID: job.ID}
+			if job.DisabledAt == nil {
+				item.Status = "would_change"
+			} else {
+				item.Status = "would_skip"
+				item.ErrorCode = "JOB_DISABLE_CONFLICT"
+				item.ErrorMessage = "job cannot be disabled in its current state"
+			}
+			results = append(results, item)
+			continue
+		}
 		result, err := s.store.DisableJob(ctx, job.ID, s.auditInput(principal, "JOB_DISABLE", "job", job.ID, job.TenantID, map[string]any{"bulk": true}))
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
@@ -431,6 +443,18 @@ func (s *Server) handleBulkEnableJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]BulkJobOperationItem, 0, len(jobs))
 	for _, job := range jobs {
+		if req.DryRun {
+			item := BulkJobOperationItem{JobID: job.ID}
+			if job.DisabledAt != nil {
+				item.Status = "would_change"
+			} else {
+				item.Status = "would_skip"
+				item.ErrorCode = "JOB_ENABLE_CONFLICT"
+				item.ErrorMessage = "job cannot be enabled in its current state"
+			}
+			results = append(results, item)
+			continue
+		}
 		result, err := s.store.EnableJob(ctx, job.ID, s.auditInput(principal, "JOB_ENABLE", "job", job.ID, job.TenantID, map[string]any{"bulk": true}))
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
@@ -475,6 +499,18 @@ func (s *Server) handleBulkPauseJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]BulkJobOperationItem, 0, len(jobs))
 	for _, job := range jobs {
+		if req.DryRun {
+			item := BulkJobOperationItem{JobID: job.ID}
+			if job.PausedAt == nil && job.DisabledAt == nil {
+				item.Status = "would_change"
+			} else {
+				item.Status = "would_skip"
+				item.ErrorCode = "JOB_PAUSE_CONFLICT"
+				item.ErrorMessage = "job cannot be paused in its current state"
+			}
+			results = append(results, item)
+			continue
+		}
 		result, err := s.store.PauseJob(ctx, job.ID, s.auditInput(principal, "JOB_PAUSE", "job", job.ID, job.TenantID, map[string]any{"bulk": true}))
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
@@ -519,6 +555,18 @@ func (s *Server) handleBulkResumeJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]BulkJobOperationItem, 0, len(jobs))
 	for _, job := range jobs {
+		if req.DryRun {
+			item := BulkJobOperationItem{JobID: job.ID}
+			if job.PausedAt != nil && job.DisabledAt == nil {
+				item.Status = "would_change"
+			} else {
+				item.Status = "would_skip"
+				item.ErrorCode = "JOB_RESUME_CONFLICT"
+				item.ErrorMessage = "job cannot be resumed in its current state"
+			}
+			results = append(results, item)
+			continue
+		}
 		result, err := s.store.ResumeJob(ctx, job.ID, s.auditInput(principal, "JOB_RESUME", "job", job.ID, job.TenantID, map[string]any{"bulk": true}))
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {

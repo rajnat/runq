@@ -172,6 +172,7 @@ type BulkJobOperationRequest struct {
 	Kind     string   `json:"kind,omitempty"`
 	Paused   *bool    `json:"paused,omitempty"`
 	Disabled *bool    `json:"disabled,omitempty"`
+	DryRun   bool     `json:"dry_run,omitempty"`
 }
 
 type BulkJobOperationItem struct {

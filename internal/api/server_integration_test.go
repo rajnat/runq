@@ -2259,6 +2259,224 @@ func TestBulkPauseAndResumeJobsWithPartialFailures(t *testing.T) {
 	}
 }
 
+func TestBulkJobLifecycleDryRunDoesNotMutateState(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	activeJob, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-bulk-dry-run-active",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create active job: %v", err)
+	}
+	disabledJob, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-bulk-dry-run-disabled",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create disabled job: %v", err)
+	}
+	if _, err := jobStore.DisableJob(ctx, disabledJob.JobID, nil); err != nil {
+		t.Fatalf("disable seed job: %v", err)
+	}
+	pausedJob, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-bulk-dry-run-paused",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create paused job: %v", err)
+	}
+	if _, err := jobStore.PauseJob(ctx, pausedJob.JobID, nil); err != nil {
+		t.Fatalf("pause seed job: %v", err)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	assertJobState := func(jobID string, disabled bool, paused bool) {
+		t.Helper()
+		job, err := jobStore.GetJob(ctx, jobID)
+		if err != nil {
+			t.Fatalf("get job %s: %v", jobID, err)
+		}
+		if (job.DisabledAt != nil) != disabled {
+			t.Fatalf("job %s disabled mismatch: got %+v", jobID, job.DisabledAt)
+		}
+		if (job.PausedAt != nil) != paused {
+			t.Fatalf("job %s paused mismatch: got %+v", jobID, job.PausedAt)
+		}
+	}
+
+	var disableResp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			JobID        string `json:"job_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/disable", map[string]any{
+		"job_ids": []string{activeJob.JobID, disabledJob.JobID},
+		"dry_run": true,
+	}, &disableResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk disable dry-run response, got %d", status)
+	}
+	wouldChange := 0
+	wouldSkip := 0
+	for _, item := range disableResp.Results {
+		switch item.Status {
+		case "would_change":
+			wouldChange++
+		case "would_skip":
+			wouldSkip++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected dry-run skip reason, got %+v", item)
+			}
+		default:
+			t.Fatalf("unexpected bulk disable dry-run item: %+v", item)
+		}
+	}
+	if wouldChange != 1 || wouldSkip != 1 {
+		t.Fatalf("expected one would_change and one would_skip result, got %+v", disableResp.Results)
+	}
+	assertJobState(activeJob.JobID, false, false)
+	assertJobState(disabledJob.JobID, true, false)
+
+	var enableResp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			JobID        string `json:"job_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/enable", map[string]any{
+		"job_ids": []string{activeJob.JobID, disabledJob.JobID},
+		"dry_run": true,
+	}, &enableResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk enable dry-run response, got %d", status)
+	}
+	wouldChange = 0
+	wouldSkip = 0
+	for _, item := range enableResp.Results {
+		switch item.Status {
+		case "would_change":
+			wouldChange++
+		case "would_skip":
+			wouldSkip++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected dry-run skip reason, got %+v", item)
+			}
+		default:
+			t.Fatalf("unexpected bulk enable dry-run item: %+v", item)
+		}
+	}
+	if wouldChange != 1 || wouldSkip != 1 {
+		t.Fatalf("expected one would_change and one would_skip result, got %+v", enableResp.Results)
+	}
+	assertJobState(activeJob.JobID, false, false)
+	assertJobState(disabledJob.JobID, true, false)
+
+	var pauseResp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			JobID        string `json:"job_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/pause", map[string]any{
+		"job_ids": []string{activeJob.JobID, pausedJob.JobID},
+		"dry_run": true,
+	}, &pauseResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk pause dry-run response, got %d", status)
+	}
+	wouldChange = 0
+	wouldSkip = 0
+	for _, item := range pauseResp.Results {
+		switch item.Status {
+		case "would_change":
+			wouldChange++
+		case "would_skip":
+			wouldSkip++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected dry-run skip reason, got %+v", item)
+			}
+		default:
+			t.Fatalf("unexpected bulk pause dry-run item: %+v", item)
+		}
+	}
+	if wouldChange != 1 || wouldSkip != 1 {
+		t.Fatalf("expected one would_change and one would_skip result, got %+v", pauseResp.Results)
+	}
+	assertJobState(activeJob.JobID, false, false)
+	assertJobState(pausedJob.JobID, false, true)
+
+	var resumeResp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			JobID        string `json:"job_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"results"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/resume", map[string]any{
+		"job_ids": []string{activeJob.JobID, pausedJob.JobID},
+		"dry_run": true,
+	}, &resumeResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 bulk resume dry-run response, got %d", status)
+	}
+	wouldChange = 0
+	wouldSkip = 0
+	for _, item := range resumeResp.Results {
+		switch item.Status {
+		case "would_change":
+			wouldChange++
+		case "would_skip":
+			wouldSkip++
+			if item.ErrorCode == "" || item.ErrorMessage == "" {
+				t.Fatalf("expected dry-run skip reason, got %+v", item)
+			}
+		default:
+			t.Fatalf("unexpected bulk resume dry-run item: %+v", item)
+		}
+	}
+	if wouldChange != 1 || wouldSkip != 1 {
+		t.Fatalf("expected one would_change and one would_skip result, got %+v", resumeResp.Results)
+	}
+	assertJobState(activeJob.JobID, false, false)
+	assertJobState(pausedJob.JobID, false, true)
+}
+
 func TestRegisterWorkerReusesIdentityByName(t *testing.T) {
 	jobStore := openTestStore(t)
 
