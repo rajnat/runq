@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -60,7 +62,9 @@ func (a *App) Run(args []string) error {
 		return a.runAuth(args[1:])
 	case "config":
 		return a.runConfig(args[1:])
-	case "jobs", "runs", "workers", "quotas":
+	case "jobs":
+		return a.runJobs(args[1:])
+	case "runs", "workers", "quotas":
 		_, _ = fmt.Fprintf(a.stdout, "%s commands not implemented yet\n", args[0])
 		return nil
 	default:
@@ -95,10 +99,141 @@ func (a *App) runConfig(args []string) error {
 	return errors.New("usage: runq config show")
 }
 
+func (a *App) runJobs(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: runq jobs <list|get|create|update|disable>")
+	}
+	switch args[0] {
+	case "list":
+		query := url.Values{}
+		for i := 1; i < len(args); i += 2 {
+			if i+1 >= len(args) || !strings.HasPrefix(args[i], "--") {
+				return errors.New("usage: runq jobs list [--tenant-id <tenant>] [--queue <queue>]")
+			}
+			query.Set(strings.ReplaceAll(strings.TrimPrefix(args[i], "--"), "-", "_"), args[i+1])
+		}
+		var resp apiPkg.ListJobsResponse
+		if err := a.getJSON(context.Background(), "/v1/jobs?"+query.Encode(), &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "get":
+		if len(args) != 2 {
+			return errors.New("usage: runq jobs get <job-id>")
+		}
+		var resp map[string]any
+		if err := a.getJSON(context.Background(), "/v1/jobs/"+args[1], &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "create":
+		if len(args) != 2 {
+			return errors.New("usage: runq jobs create <json-payload>")
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(args[1]), &payload); err != nil {
+			return err
+		}
+		var resp apiPkg.CreateJobResponse
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/jobs", payload, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "update":
+		if len(args) != 3 {
+			return errors.New("usage: runq jobs update <job-id> <json-payload>")
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(args[2]), &payload); err != nil {
+			return err
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPatch, "/v1/jobs/"+args[1], payload, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "disable":
+		if len(args) != 2 {
+			return errors.New("usage: runq jobs disable <job-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/jobs/"+args[1]+"/disable", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "enable":
+		if len(args) != 2 {
+			return errors.New("usage: runq jobs enable <job-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/jobs/"+args[1]+"/enable", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "pause":
+		if len(args) != 2 {
+			return errors.New("usage: runq jobs pause <job-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/jobs/"+args[1]+"/pause", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "resume":
+		if len(args) != 2 {
+			return errors.New("usage: runq jobs resume <job-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/jobs/"+args[1]+"/resume", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "trigger":
+		if len(args) != 2 {
+			return errors.New("usage: runq jobs trigger <job-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/jobs/"+args[1]+"/trigger", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "cancel":
+		if len(args) != 2 {
+			return errors.New("usage: runq jobs cancel <job-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/jobs/"+args[1]+"/cancel", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	default:
+		return fmt.Errorf("unknown jobs command: %s", args[0])
+	}
+}
+
 func (a *App) getJSON(ctx context.Context, path string, dst any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.cfg.BaseURL+path, nil)
+	return a.doRequestJSON(ctx, http.MethodGet, path, nil, dst)
+}
+
+func (a *App) doJSON(ctx context.Context, method, path string, body any, dst any) error {
+	return a.doRequestJSON(ctx, method, path, body, dst)
+}
+
+func (a *App) doRequestJSON(ctx context.Context, method, path string, body any, dst any) error {
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, a.cfg.BaseURL+path, reader)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if a.cfg.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.cfg.Token)
@@ -109,8 +244,13 @@ func (a *App) getJSON(ctx context.Context, path string, dst any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		payload, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 	return json.NewDecoder(resp.Body).Decode(dst)
+}
+
+func (a *App) writeJSON(v any) error {
+	enc := json.NewEncoder(a.stdout)
+	return enc.Encode(v)
 }
