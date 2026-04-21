@@ -682,6 +682,125 @@ func TestWorkerDetailAndLifecycleControls(t *testing.T) {
 	}
 }
 
+func TestReactivateWorkerRestoresHealthyStatusAndAssignments(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var registerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "reactivate-worker",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &registerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	var lifecycleResp struct {
+		WorkerID string `json:"worker_id"`
+		Status   string `json:"status"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/"+registerResp.WorkerID+"/drain", nil, &lifecycleResp)
+	if status != http.StatusOK || lifecycleResp.Status != "drained" {
+		t.Fatalf("expected drained worker response, got status=%d body=%+v", status, lifecycleResp)
+	}
+
+	result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "reactivate-check-job",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	assignments, _, err := jobStore.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim pending runs while drained: %v", err)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("expected drained worker to receive no assignments, got %+v", assignments)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/"+registerResp.WorkerID+"/reactivate", nil, &lifecycleResp)
+	if status != http.StatusOK || lifecycleResp.Status != "healthy" {
+		t.Fatalf("expected healthy worker response, got status=%d body=%+v", status, lifecycleResp)
+	}
+
+	var detailResp struct {
+		Worker store.Worker `json:"worker"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers/"+registerResp.WorkerID, nil, &detailResp)
+	if status != http.StatusOK || detailResp.Worker.Status != "healthy" {
+		t.Fatalf("expected healthy worker detail, got status=%d body=%+v", status, detailResp)
+	}
+
+	assignments, _, err = jobStore.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim pending runs after reactivate: %v", err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected one assignment after reactivate, got %+v", assignments)
+	}
+	if assignments[0].WorkerID != registerResp.WorkerID || assignments[0].RunID != *result.RunID {
+		t.Fatalf("expected reactivated worker to receive pending run, got %+v", assignments[0])
+	}
+}
+
+func TestReactivateWorkerRejectsDecommissionedState(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var registerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "decommissioned-worker",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &registerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	var lifecycleResp struct {
+		WorkerID string `json:"worker_id"`
+		Status   string `json:"status"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/"+registerResp.WorkerID+"/decommission", nil, &lifecycleResp)
+	if status != http.StatusOK || lifecycleResp.Status != "decommissioned" {
+		t.Fatalf("expected decommissioned worker response, got status=%d body=%+v", status, lifecycleResp)
+	}
+
+	var errResp errorEnvelope
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/"+registerResp.WorkerID+"/reactivate", nil, &errResp)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 reactivating decommissioned worker, got %d with %+v", status, errResp)
+	}
+	if errResp.Error.Code != "WORKER_REACTIVATE_CONFLICT" {
+		t.Fatalf("expected worker reactivate conflict code, got %+v", errResp)
+	}
+
+	var detailResp struct {
+		Worker store.Worker `json:"worker"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers/"+registerResp.WorkerID, nil, &detailResp)
+	if status != http.StatusOK || detailResp.Worker.Status != "decommissioned" {
+		t.Fatalf("expected decommissioned worker detail after failed reactivate, got status=%d body=%+v", status, detailResp)
+	}
+}
+
 func TestListAuditEventsSupportsCursorPagination(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)

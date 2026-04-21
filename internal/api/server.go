@@ -113,6 +113,7 @@ func (s *Server) routes() {
 	s.handle("GET /v1/workers", s.handleListWorkers)
 	s.handle("GET /v1/workers/{workerID}", s.handleGetWorker)
 	s.handle("POST /v1/workers/{workerID}/drain", s.handleDrainWorker)
+	s.handle("POST /v1/workers/{workerID}/reactivate", s.handleReactivateWorker)
 	s.handle("POST /v1/workers/{workerID}/decommission", s.handleDecommissionWorker)
 	s.handle("POST /v1/workers/register", s.handleRegisterWorker)
 	s.handle("POST /v1/workers/{workerID}/poll", s.handlePollWorker)
@@ -1689,6 +1690,31 @@ func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to drain worker")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"worker_id": worker.ID, "status": worker.Status})
+}
+
+func (s *Server) handleReactivateWorker(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok { return }
+	if principal.Role != roleAdmin {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin access required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	worker, err := s.store.ReactivateWorker(ctx, r.PathValue("workerID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "worker not found")
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "WORKER_REACTIVATE_CONFLICT", "worker can only be reactivated from drained state")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to reactivate worker")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"worker_id": worker.ID, "status": worker.Status})

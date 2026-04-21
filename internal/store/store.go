@@ -1632,6 +1632,41 @@ func (s *Store) SetWorkerStatus(ctx context.Context, workerID string, status str
 	return s.GetWorker(ctx, workerID)
 }
 
+func (s *Store) ReactivateWorker(ctx context.Context, workerID string) (Worker, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Worker{}, fmt.Errorf("begin reactivate worker tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var currentStatus string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status
+		FROM workers
+		WHERE id = $1
+		FOR UPDATE
+	`, workerID).Scan(&currentStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Worker{}, sql.ErrNoRows
+		}
+		return Worker{}, fmt.Errorf("load worker status for reactivate: %w", err)
+	}
+	if currentStatus != "drained" {
+		return Worker{}, ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workers
+		SET status = 'healthy'
+		WHERE id = $1
+	`, workerID); err != nil {
+		return Worker{}, fmt.Errorf("update worker status to healthy: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Worker{}, fmt.Errorf("commit reactivate worker tx: %w", err)
+	}
+	return s.GetWorker(ctx, workerID)
+}
+
 func (s *Store) UpsertTenantQuota(ctx context.Context, tenantID string, maxInflight, maxPendingRuns, maxActiveJobs int, audit *AuditEventInput) (TenantQuota, error) {
 	ctx, span := observability.Tracer("runq/store").Start(ctx, "store.upsert_tenant_quota")
 	defer span.End()
