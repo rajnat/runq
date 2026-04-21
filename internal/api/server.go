@@ -1619,6 +1619,14 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+	if statusFilter != "" && statusFilter != "healthy" && statusFilter != "drained" && statusFilter != "decommissioned" {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "status must be one of healthy, drained, or decommissioned")
+		return
+	}
+	queueFilter := strings.TrimSpace(r.URL.Query().Get("queue"))
+	capabilityFilter := strings.TrimSpace(r.URL.Query().Get("capability"))
+
 	limit, err := parseOptionalInt(r.URL.Query().Get("limit"), 1)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
@@ -1635,7 +1643,14 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workers, hasMore, nextBoundary, err := s.store.ListWorkersPage(ctx, store.WorkerFilter{Limit: limit, Offset: offset, Cursor: cursor})
+	workers, hasMore, nextBoundary, err := s.store.ListWorkersPage(ctx, store.WorkerFilter{
+		Status:     statusFilter,
+		Queue:      queueFilter,
+		Capability: capabilityFilter,
+		Limit:      limit,
+		Offset:     offset,
+		Cursor:     cursor,
+	})
 	if err != nil {
 		s.logger.Printf("list workers failed: %v", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list workers")

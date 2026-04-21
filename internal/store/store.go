@@ -196,9 +196,12 @@ type AuditEventFilter struct {
 }
 
 type WorkerFilter struct {
-	Limit  int
-	Offset int
-	Cursor *PageBoundary
+	Status     string
+	Queue      string
+	Capability string
+	Limit      int
+	Offset     int
+	Cursor     *PageBoundary
 }
 
 type eligibleWorker struct {
@@ -1509,7 +1512,19 @@ func (s *Store) ListWorkersPage(ctx context.Context, filter WorkerFilter) ([]Wor
 		FROM workers
 		WHERE 1=1
 	`
-	args := make([]any, 0, 2)
+	args := make([]any, 0, 5)
+	if filter.Status != "" {
+		args = append(args, filter.Status)
+		query += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+	if filter.Queue != "" {
+		args = append(args, filter.Queue)
+		query += fmt.Sprintf(" AND $%d = ANY(queues)", len(args))
+	}
+	if filter.Capability != "" {
+		args = append(args, filter.Capability)
+		query += fmt.Sprintf(" AND capabilities ->> $%d = 'true'", len(args))
+	}
 	if filter.Cursor != nil {
 		args = append(args, filter.Cursor.CreatedAt, filter.Cursor.ID)
 		createdAtArg := len(args) - 1

@@ -602,6 +602,89 @@ func TestListWorkersSupportsCursorPagination(t *testing.T) {
 	}
 }
 
+func TestListWorkersSupportsStatusQueueAndCapabilityFilters(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	register := func(name string, queues []string, capabilities map[string]any) string {
+		t.Helper()
+		var resp RegisterWorkerResponse
+		status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+			"name":            name,
+			"queues":          queues,
+			"capabilities":    capabilities,
+			"max_concurrency": 1,
+		}, &resp)
+		if status != http.StatusCreated {
+			t.Fatalf("expected 201 registering %s, got %d", name, status)
+		}
+		return resp.WorkerID
+	}
+
+	alphaID := register("filter-worker-alpha", []string{"default"}, map[string]any{"http": true})
+	time.Sleep(10 * time.Millisecond)
+	betaID := register("filter-worker-beta", []string{"priority"}, map[string]any{"shell": true})
+	time.Sleep(10 * time.Millisecond)
+	gammaID := register("filter-worker-gamma", []string{"default", "priority"}, map[string]any{"http": true, "shell": true})
+
+	var lifecycleResp struct {
+		WorkerID string `json:"worker_id"`
+		Status   string `json:"status"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/"+betaID+"/drain", nil, &lifecycleResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 draining beta worker, got %d", status)
+	}
+
+	var drainedResp struct {
+		Workers []store.Worker `json:"workers"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?status=drained", nil, &drainedResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing drained workers, got %d", status)
+	}
+	if len(drainedResp.Workers) != 1 || drainedResp.Workers[0].ID != betaID {
+		t.Fatalf("expected only drained beta worker, got %+v", drainedResp.Workers)
+	}
+
+	var priorityResp struct {
+		Workers []store.Worker `json:"workers"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?queue=priority", nil, &priorityResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing priority workers, got %d", status)
+	}
+	if len(priorityResp.Workers) != 2 || priorityResp.Workers[0].ID != gammaID || priorityResp.Workers[1].ID != betaID {
+		t.Fatalf("expected priority workers gamma then beta, got %+v", priorityResp.Workers)
+	}
+
+	var shellResp struct {
+		Workers []store.Worker `json:"workers"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?capability=shell", nil, &shellResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing shell workers, got %d", status)
+	}
+	if len(shellResp.Workers) != 2 || shellResp.Workers[0].ID != gammaID || shellResp.Workers[1].ID != betaID {
+		t.Fatalf("expected shell workers gamma then beta, got %+v", shellResp.Workers)
+	}
+
+	var combinedResp struct {
+		Workers []store.Worker `json:"workers"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?status=healthy&queue=default&capability=http", nil, &combinedResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 listing combined worker filters, got %d", status)
+	}
+	if len(combinedResp.Workers) != 2 || combinedResp.Workers[0].ID != gammaID || combinedResp.Workers[1].ID != alphaID {
+		t.Fatalf("expected healthy default http workers gamma then alpha, got %+v", combinedResp.Workers)
+	}
+}
+
 func TestWorkerDetailAndLifecycleControls(t *testing.T) {
 	jobStore := openTestStore(t)
 	ctx := context.Background()
