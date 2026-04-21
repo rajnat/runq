@@ -127,6 +127,10 @@ func (s *Server) handle(pattern string, handler http.HandlerFunc) {
 	s.mux.Handle(pattern, s.instrument(pattern, handler))
 }
 
+func (s *Server) MuxForTests() http.Handler {
+	return s.mux
+}
+
 func (s *Server) instrument(route string, handler http.HandlerFunc) http.Handler {
 	method := strings.TrimSpace(strings.SplitN(route, " ", 2)[0])
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
