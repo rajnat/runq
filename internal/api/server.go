@@ -1049,6 +1049,8 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		TenantID:     strings.TrimSpace(r.URL.Query().Get("tenant_id")),
 		Action:       strings.TrimSpace(r.URL.Query().Get("action")),
 		ResourceType: strings.TrimSpace(r.URL.Query().Get("resource_type")),
+		ResourceID:   strings.TrimSpace(r.URL.Query().Get("resource_id")),
+		ActorID:      strings.TrimSpace(r.URL.Query().Get("actor_id")),
 		Limit:        limit,
 		Offset:       offset,
 		Cursor:       cursor,

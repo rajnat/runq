@@ -1199,6 +1199,58 @@ func TestListAuditEventsSupportsCursorPagination(t *testing.T) {
 	}
 }
 
+func TestListAuditEventsSupportsResourceAndActorFilters(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	now := time.Now().UTC()
+	for _, event := range []struct {
+		eventTime time.Time
+		actorID string
+		action string
+		resourceType string
+		resourceID string
+		tenantID string
+	}{
+		{now.Add(-3 * time.Minute), "admin-user", "JOB_UPDATE", "job", "job-1", "tenant-a"},
+		{now.Add(-2 * time.Minute), "service-user", "JOB_UPDATE", "job", "job-2", "tenant-a"},
+		{now.Add(-1 * time.Minute), "admin-user", "WORKER_DRAIN", "worker", "worker-1", "tenant-a"},
+	} {
+		if _, err := jobStore.DB().ExecContext(ctx, `
+			INSERT INTO audit_events (event_time, actor_role, actor_id, action, resource_type, resource_id, tenant_id, payload)
+			VALUES ($1, 'admin', $2, $3, $4, $5, $6, '{}'::jsonb)
+		`, event.eventTime, event.actorID, event.action, event.resourceType, event.resourceID, event.tenantID); err != nil {
+			t.Fatalf("insert audit event %s: %v", event.resourceID, err)
+		}
+	}
+
+	assertAuditIDs := func(url string, expected ...string) {
+		t.Helper()
+		resp := ListAuditEventsResponse{}
+		status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, url, nil, &resp)
+		if status != http.StatusOK {
+			t.Fatalf("expected 200 listing audit events for %s, got %d", url, status)
+		}
+		if len(resp.Events) != len(expected) {
+			t.Fatalf("expected %d events for %s, got %+v", len(expected), url, resp.Events)
+		}
+		for i, resourceID := range expected {
+			if resp.Events[i].ResourceID != resourceID {
+				t.Fatalf("unexpected audit events for %s: got %+v expected resource_ids=%+v", url, resp.Events, expected)
+			}
+		}
+	}
+
+	assertAuditIDs(httpServer.URL+"/v1/audit/events?resource_id=job-2", "job-2")
+	assertAuditIDs(httpServer.URL+"/v1/audit/events?actor_id=admin-user", "worker-1", "job-1")
+	assertAuditIDs(httpServer.URL+"/v1/audit/events?actor_id=admin-user&resource_id=worker-1", "worker-1")
+}
+
 func TestDisableAndEnableJobEndpoints(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)

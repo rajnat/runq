@@ -197,6 +197,8 @@ type AuditEventFilter struct {
 	TenantID     string
 	Action       string
 	ResourceType string
+	ResourceID   string
+	ActorID      string
 	Limit        int
 	Offset       int
 	Cursor       *PageBoundary
@@ -1844,6 +1846,14 @@ func (s *Store) ListAuditEventsPage(ctx context.Context, filter AuditEventFilter
 	if filter.ResourceType != "" {
 		args = append(args, filter.ResourceType)
 		query += fmt.Sprintf(" AND resource_type = $%d", len(args))
+	}
+	if filter.ResourceID != "" {
+		args = append(args, filter.ResourceID)
+		query += fmt.Sprintf(" AND resource_id = $%d", len(args))
+	}
+	if filter.ActorID != "" {
+		args = append(args, filter.ActorID)
+		query += fmt.Sprintf(" AND actor_id = $%d", len(args))
 	}
 	if filter.Cursor != nil {
 		id, err := strconv.ParseInt(filter.Cursor.ID, 10, 64)
