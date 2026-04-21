@@ -64,7 +64,9 @@ func (a *App) Run(args []string) error {
 		return a.runConfig(args[1:])
 	case "jobs":
 		return a.runJobs(args[1:])
-	case "runs", "workers", "quotas":
+	case "runs":
+		return a.runRuns(args[1:])
+	case "workers", "quotas":
 		_, _ = fmt.Fprintf(a.stdout, "%s commands not implemented yet\n", args[0])
 		return nil
 	default:
@@ -208,6 +210,65 @@ func (a *App) runJobs(args []string) error {
 		return a.writeJSON(resp)
 	default:
 		return fmt.Errorf("unknown jobs command: %s", args[0])
+	}
+}
+
+func (a *App) runRuns(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: runq runs <list|get|cancel|requeue|redrive>")
+	}
+	switch args[0] {
+	case "list":
+		query := url.Values{}
+		for i := 1; i < len(args); i += 2 {
+			if i+1 >= len(args) || !strings.HasPrefix(args[i], "--") {
+				return errors.New("usage: runq runs list [--tenant-id <tenant>] [--job-id <job-id>]")
+			}
+			query.Set(strings.ReplaceAll(strings.TrimPrefix(args[i], "--"), "-", "_"), args[i+1])
+		}
+		var resp apiPkg.ListRunsResponse
+		if err := a.getJSON(context.Background(), "/v1/runs?"+query.Encode(), &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "get":
+		if len(args) != 2 {
+			return errors.New("usage: runq runs get <run-id>")
+		}
+		var resp map[string]any
+		if err := a.getJSON(context.Background(), "/v1/runs/"+args[1], &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "cancel":
+		if len(args) != 2 {
+			return errors.New("usage: runq runs cancel <run-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/runs/"+args[1]+"/cancel", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "requeue":
+		if len(args) != 2 {
+			return errors.New("usage: runq runs requeue <run-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/runs/"+args[1]+"/requeue", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	case "redrive":
+		if len(args) != 2 {
+			return errors.New("usage: runq runs redrive <run-id>")
+		}
+		var resp map[string]any
+		if err := a.doJSON(context.Background(), http.MethodPost, "/v1/runs/"+args[1]+"/redrive", nil, &resp); err != nil {
+			return err
+		}
+		return a.writeJSON(resp)
+	default:
+		return fmt.Errorf("unknown runs command: %s", args[0])
 	}
 }
 

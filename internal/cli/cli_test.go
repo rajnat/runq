@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -74,17 +75,7 @@ func TestRunConfigShow(t *testing.T) {
 func TestRunJobsCommands(t *testing.T) {
 	jobStore := openTestStoreForCLI(t)
 	resetTablesForCLI(t, jobStore)
-	server, err := apiPkg.NewServer(config.APIConfig{
-		Address:                 ":0",
-		DBConnString:            "",
-		AuthTokens:              "tenant-token:tenant:tenant-api",
-		WorkerHeartbeatInterval: 5 * time.Second,
-		WorkerLeaseDuration:     30 * time.Second,
-	}, log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	httpServer := httptest.NewServer(server.MuxForTests())
+	httpServer := newCLITestServer(t, jobStore)
 	defer httpServer.Close()
 
 	newApp := func() (*App, *bytes.Buffer, *bytes.Buffer) {
@@ -201,6 +192,89 @@ func TestRunJobsCommands(t *testing.T) {
 	}
 }
 
+func TestRunRunsCommands(t *testing.T) {
+	jobStore := openTestStoreForCLI(t)
+	resetTablesForCLI(t, jobStore)
+	httpServer := newCLITestServer(t, jobStore)
+	defer httpServer.Close()
+
+	newApp := func() (*App, *bytes.Buffer, *bytes.Buffer) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		return New(AppConfig{BaseURL: httpServer.URL, Token: "tenant-token"}, &stdout, &stderr), &stdout, &stderr
+	}
+
+	createPayload := `{"name":"cli-run-job","tenant_id":"tenant-api","queue":"default","kind":"http","payload":{"url":"https://example.internal/task"}}`
+	app, stdout, stderr := newApp()
+	if err := app.Run([]string{"jobs", "create", createPayload}); err != nil {
+		t.Fatalf("create job for runs commands: %v stderr=%s", err, stderr.String())
+	}
+	var createResp apiPkg.CreateJobResponse
+	if err := json.Unmarshal(stdout.Bytes(), &createResp); err != nil {
+		t.Fatalf("unmarshal create output: %v output=%q", err, stdout.String())
+	}
+	if createResp.RunID == nil || *createResp.RunID == "" {
+		t.Fatalf("expected initial run id, got %+v", createResp)
+	}
+	firstRunID := *createResp.RunID
+
+	app, stdout, stderr = newApp()
+	if err := app.Run([]string{"runs", "get", firstRunID}); err != nil {
+		t.Fatalf("runs get: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"id":"`+firstRunID+`"`) {
+		t.Fatalf("expected runs get output to include run id, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newApp()
+	if err := app.Run([]string{"runs", "list", "--tenant-id", "tenant-api", "--job-id", createResp.JobID}); err != nil {
+		t.Fatalf("runs list: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"runs"`) || !strings.Contains(stdout.String(), firstRunID) {
+		t.Fatalf("expected runs list output to include created run, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newApp()
+	if err := app.Run([]string{"runs", "cancel", firstRunID}); err != nil {
+		t.Fatalf("runs cancel: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"status":"canceled"`) {
+		t.Fatalf("expected runs cancel output to include canceled status, got %q", stdout.String())
+	}
+
+	app, stdout, stderr = newApp()
+	if err := app.Run([]string{"runs", "requeue", firstRunID}); err != nil {
+		t.Fatalf("runs requeue: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"run_id"`) || !strings.Contains(stdout.String(), `"accepted"`) {
+		t.Fatalf("expected runs requeue output to include new run id, got %q", stdout.String())
+	}
+
+	triggerPayload := `{"name":"cli-run-redrive-job","tenant_id":"tenant-api","queue":"default","kind":"http","payload":{"url":"https://example.internal/task"}}`
+	app, stdout, stderr = newApp()
+	if err := app.Run([]string{"jobs", "create", triggerPayload}); err != nil {
+		t.Fatalf("create job for redrive: %v stderr=%s", err, stderr.String())
+	}
+	var secondCreate apiPkg.CreateJobResponse
+	if err := json.Unmarshal(stdout.Bytes(), &secondCreate); err != nil {
+		t.Fatalf("unmarshal second create output: %v output=%q", err, stdout.String())
+	}
+	secondRunID := *secondCreate.RunID
+
+	ctx := context.Background()
+	if _, err := jobStore.DB().ExecContext(ctx, `UPDATE runs SET status = 'FAILED', error_code = 'TEST_FAIL', error_message = 'forced failure', dead_lettered_at = NOW(), dead_letter_reason = 'forced dead-letter', completed_at = NOW(), updated_at = NOW() WHERE id = $1`, secondRunID); err != nil {
+		t.Fatalf("mark run failed: %v", err)
+	}
+
+	app, stdout, stderr = newApp()
+	if err := app.Run([]string{"runs", "redrive", secondRunID}); err != nil {
+		t.Fatalf("runs redrive: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"run_id"`) || !strings.Contains(stdout.String(), `"accepted"`) {
+		t.Fatalf("expected runs redrive output to include new run id, got %q", stdout.String())
+	}
+}
+
 func openTestStoreForCLI(t *testing.T) *store.Store {
 	t.Helper()
 	dbURL := os.Getenv("RUNQ_DATABASE_URL")
@@ -213,6 +287,21 @@ func openTestStoreForCLI(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { _ = jobStore.Close() })
 	return jobStore
+}
+
+func newCLITestServer(t *testing.T, jobStore *store.Store) *httptest.Server {
+	t.Helper()
+	server, err := apiPkg.NewServer(config.APIConfig{
+		Address:                 ":0",
+		DBConnString:            "",
+		AuthTokens:              "tenant-token:tenant:tenant-api",
+		WorkerHeartbeatInterval: 5 * time.Second,
+		WorkerLeaseDuration:     30 * time.Second,
+	}, log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return httptest.NewServer(server.MuxForTests())
 }
 
 func resetTablesForCLI(t *testing.T, jobStore *store.Store) {
