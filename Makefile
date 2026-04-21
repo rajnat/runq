@@ -69,3 +69,7 @@ demo:
 .PHONY: e2e-smoke
 e2e-smoke:
 	./scripts/e2e_smoke.sh
+
+.PHONY: package-cli
+package-cli:
+	./scripts/package_runq_cli.sh $(VERSION)
