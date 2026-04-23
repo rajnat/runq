@@ -379,7 +379,7 @@ func TestListJobsSupportsLimitAndOffset(t *testing.T) {
 	}
 
 	var jobsResp struct {
-		Jobs       []store.Job   `json:"jobs"`
+		Jobs       []store.Job    `json:"jobs"`
 		Pagination PaginationMeta `json:"pagination"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&limit=2&offset=1", nil, &jobsResp)
@@ -438,11 +438,11 @@ func TestListJobsSupportsNewFilters(t *testing.T) {
 	gammaCreated := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
 	gammaUpdated := gammaCreated.Add(10 * time.Minute)
 	for _, update := range []struct {
-		id string
-		dedupeKey string
+		id             string
+		dedupeKey      string
 		concurrencyKey string
-		createdAt time.Time
-		updatedAt time.Time
+		createdAt      time.Time
+		updatedAt      time.Time
 	}{
 		{alphaID, "dedupe-alpha", "account-a", alphaCreated, alphaUpdated},
 		{betaID, "dedupe-beta", "account-b", betaCreated, betaUpdated},
@@ -513,7 +513,7 @@ func TestListRunsSupportsLimitAndOffset(t *testing.T) {
 	}
 
 	var runsResp struct {
-		Runs       []store.Run   `json:"runs"`
+		Runs       []store.Run    `json:"runs"`
 		Pagination PaginationMeta `json:"pagination"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs?tenant_id=tenant-api&limit=2&offset=1", nil, &runsResp)
@@ -573,10 +573,10 @@ func TestListRunsSupportsNewFilters(t *testing.T) {
 	alphaErrorCode := "HTTP_500"
 	betaErrorCode := "TIMEOUT"
 	for _, update := range []struct {
-		id string
-		status string
-		attempt int
-		errorCode *string
+		id          string
+		status      string
+		attempt     int
+		errorCode   *string
 		scheduledAt time.Time
 		completedAt *time.Time
 	}{
@@ -1121,12 +1121,12 @@ func TestWorkerDetailIncludesInflightAssignmentsAndHealthSummary(t *testing.T) {
 				LeaseToken int64  `json:"lease_token"`
 			} `json:"inflight_runs"`
 			Health struct {
-				HeartbeatAgeSeconds int64 `json:"heartbeat_age_seconds"`
+				HeartbeatAgeSeconds   int64 `json:"heartbeat_age_seconds"`
 				HeartbeatDriftSeconds int64 `json:"heartbeat_drift_seconds"`
-				HeartbeatStale bool `json:"heartbeat_stale"`
-				InflightAssignments int `json:"inflight_assignments"`
-				AvailableCapacity int `json:"available_capacity"`
-				AtCapacity bool `json:"at_capacity"`
+				HeartbeatStale        bool  `json:"heartbeat_stale"`
+				InflightAssignments   int   `json:"inflight_assignments"`
+				AvailableCapacity     int   `json:"available_capacity"`
+				AtCapacity            bool  `json:"at_capacity"`
 			} `json:"health"`
 		} `json:"worker"`
 	}
@@ -1210,12 +1210,12 @@ func TestListAuditEventsSupportsResourceAndActorFilters(t *testing.T) {
 
 	now := time.Now().UTC()
 	for _, event := range []struct {
-		eventTime time.Time
-		actorID string
-		action string
+		eventTime    time.Time
+		actorID      string
+		action       string
 		resourceType string
-		resourceID string
-		tenantID string
+		resourceID   string
+		tenantID     string
 	}{
 		{now.Add(-3 * time.Minute), "admin-user", "JOB_UPDATE", "job", "job-1", "tenant-a"},
 		{now.Add(-2 * time.Minute), "service-user", "JOB_UPDATE", "job", "job-2", "tenant-a"},
@@ -1613,6 +1613,28 @@ func TestCreateJobReturnsTooManyRequestsWhenTenantPendingQuotaExceeded(t *testin
 	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", payload, &map[string]any{})
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 on pending quota exceed, got %d", status)
+	}
+}
+
+func TestTenantQuotaEndpointAllowsResetToUnlimited(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var resp TenantQuotaResponse
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPut, httpServer.URL+"/v1/tenants/tenant-api/quota", map[string]any{
+		"max_inflight":     0,
+		"max_pending_runs": 0,
+		"max_active_jobs":  0,
+	}, &resp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 resetting quota to unlimited, got %d", status)
+	}
+	if resp.MaxInflight != 0 || resp.MaxPendingRuns != 0 || resp.MaxActiveJobs != 0 {
+		t.Fatalf("expected zeroed unlimited quota response, got %+v", resp)
 	}
 }
 
@@ -2144,6 +2166,92 @@ func TestRequeueRunEndpointRejectsSucceededRun(t *testing.T) {
 	}
 }
 
+func TestRequeueRunEndpointPrefersConflictOverQuotaExceededForSucceededRun(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-requeue-succeeded-quota",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "cron",
+		CronExpr:     "*/5 * * * *",
+		Timezone:     "UTC",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := jobStore.DB().ExecContext(ctx, `UPDATE job_schedules SET next_run_at = NOW() - INTERVAL '1 second' WHERE job_id = $1`, result.JobID); err != nil {
+		t.Fatalf("set due schedule: %v", err)
+	}
+	if _, err := jobStore.MaterializeDueRuns(ctx, 1); err != nil {
+		t.Fatalf("materialize due runs: %v", err)
+	}
+	runs, err := jobStore.ListRuns(ctx, store.RunFilter{JobID: result.JobID})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	worker, err := jobStore.RegisterWorker(ctx, store.RegisterWorkerInput{
+		Name:           "api-success-quota-worker",
+		Queues:         []string{"default"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "api"},
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if _, err := jobStore.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING',
+		    worker_id = $2,
+		    lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds',
+		    started_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`, runs[0].ID, worker.WorkerID); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	if err := jobStore.CompleteRun(ctx, store.CompleteRunInput{
+		WorkerID:   worker.WorkerID,
+		RunID:      runs[0].ID,
+		LeaseToken: 1,
+		Result:     map[string]any{"status_code": 200},
+	}); err != nil {
+		t.Fatalf("complete run: %v", err)
+	}
+
+	if _, err := jobStore.UpsertTenantQuota(ctx, "tenant-api", 0, 0, 0, nil); err != nil {
+		t.Fatalf("reset tenant quota: %v", err)
+	}
+	if _, err := jobStore.UpsertTenantQuota(ctx, "tenant-api", 0, 1, 0, nil); err != nil {
+		t.Fatalf("upsert tenant quota: %v", err)
+	}
+	if _, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "quota-blocker",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "once",
+	}); err != nil {
+		t.Fatalf("create quota blocker: %v", err)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/"+runs[0].ID+"/requeue", nil, &map[string]any{})
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 for succeeded run even when quota is full, got %d", status)
+	}
+}
+
 func TestDeadLetterRunCanBeListedAndRedriven(t *testing.T) {
 	jobStore := openTestStore(t)
 	ctx := context.Background()
@@ -2308,7 +2416,7 @@ func TestBulkRequeueRunsByID(t *testing.T) {
 		} `json:"results"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/requeue", map[string]any{
-		"run_ids":  append(failedRunIDs, *succeeded.RunID),
+		"run_ids": append(failedRunIDs, *succeeded.RunID),
 		"dry_run": true,
 	}, &dryRunResp)
 	if status != http.StatusOK {
@@ -2374,6 +2482,81 @@ func TestBulkRequeueRunsByID(t *testing.T) {
 	}
 	if accepted != 2 || skipped != 1 {
 		t.Fatalf("expected 2 accepted and 1 skipped result, got %+v", resp.Results)
+	}
+}
+
+func TestBulkRequeueDeduplicatesRunIDs(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+		Name:         "api-bulk-requeue-dedupe",
+		TenantID:     "tenant-api",
+		Queue:        "default",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal/task"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	worker, err := jobStore.RegisterWorker(ctx, store.RegisterWorkerInput{
+		Name:           "api-bulk-requeue-dedupe-worker",
+		Queues:         []string{"default"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"role": "api"},
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	if _, err := jobStore.DB().ExecContext(ctx, `
+		UPDATE runs
+		SET status = 'RUNNING',
+		    worker_id = $2,
+		    lease_token = 1,
+		    lease_expires_at = NOW() + INTERVAL '30 seconds',
+		    started_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+	`, *result.RunID, worker.WorkerID); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	if err := jobStore.FailRun(ctx, store.FailRunInput{
+		WorkerID:     worker.WorkerID,
+		RunID:        *result.RunID,
+		LeaseToken:   1,
+		ErrorCode:    "HTTP_500",
+		ErrorMessage: "terminal failure",
+		Retryable:    false,
+	}); err != nil {
+		t.Fatalf("fail run: %v", err)
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var resp struct {
+		Count   int `json:"count"`
+		Results []struct {
+			FromRun string `json:"from_run"`
+			RunID   string `json:"run_id"`
+			Status  string `json:"status"`
+		} `json:"results"`
+	}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/requeue", map[string]any{
+		"run_ids": []string{*result.RunID, *result.RunID},
+	}, &resp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202 bulk requeue response, got %d", status)
+	}
+	if resp.Count != 1 || len(resp.Results) != 1 {
+		t.Fatalf("expected duplicate run ids to collapse to one result, got %+v", resp)
+	}
+	if resp.Results[0].Status != "accepted" || resp.Results[0].RunID == "" {
+		t.Fatalf("expected one accepted requeue result, got %+v", resp.Results[0])
 	}
 }
 
@@ -2662,10 +2845,10 @@ func TestBulkDisableAndEnableJobs(t *testing.T) {
 	var disableResp struct {
 		Count   int `json:"count"`
 		Results []struct {
-			JobID         string `json:"job_id"`
-			Status        string `json:"status"`
-			ErrorCode     string `json:"error_code"`
-			ErrorMessage  string `json:"error_message"`
+			JobID        string `json:"job_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
 		} `json:"results"`
 	}
 	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/disable", map[string]any{
@@ -2686,10 +2869,10 @@ func TestBulkDisableAndEnableJobs(t *testing.T) {
 	var enableResp struct {
 		Count   int `json:"count"`
 		Results []struct {
-			JobID         string `json:"job_id"`
-			Status        string `json:"status"`
-			ErrorCode     string `json:"error_code"`
-			ErrorMessage  string `json:"error_message"`
+			JobID        string `json:"job_id"`
+			Status       string `json:"status"`
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
 		} `json:"results"`
 	}
 	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/enable", map[string]any{

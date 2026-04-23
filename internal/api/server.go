@@ -321,7 +321,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	pagination.NextCursor = nextCursor
 
 	writeJSON(w, http.StatusOK, ListJobsResponse{
-		Jobs: jobs,
+		Jobs:       jobs,
 		Pagination: pagination,
 	})
 }
@@ -426,7 +426,9 @@ func (s *Server) selectJobsForBulkOperation(ctx context.Context, principal princ
 
 func (s *Server) handleBulkDisableJobs(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	if principal.Role == roleWorker {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot disable jobs")
 		return
@@ -434,7 +436,9 @@ func (s *Server) handleBulkDisableJobs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	var req BulkJobOperationRequest
-	if ok := decodeJSONBody(w, r, &req); !ok { return }
+	if ok := decodeJSONBody(w, r, &req); !ok {
+		return
+	}
 	if err := req.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
@@ -482,7 +486,9 @@ func (s *Server) handleBulkDisableJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBulkEnableJobs(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	if principal.Role == roleWorker {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot enable jobs")
 		return
@@ -490,7 +496,9 @@ func (s *Server) handleBulkEnableJobs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	var req BulkJobOperationRequest
-	if ok := decodeJSONBody(w, r, &req); !ok { return }
+	if ok := decodeJSONBody(w, r, &req); !ok {
+		return
+	}
 	if err := req.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
@@ -538,7 +546,9 @@ func (s *Server) handleBulkEnableJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBulkPauseJobs(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	if principal.Role == roleWorker {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot pause jobs")
 		return
@@ -546,7 +556,9 @@ func (s *Server) handleBulkPauseJobs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	var req BulkJobOperationRequest
-	if ok := decodeJSONBody(w, r, &req); !ok { return }
+	if ok := decodeJSONBody(w, r, &req); !ok {
+		return
+	}
 	if err := req.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
@@ -594,7 +606,9 @@ func (s *Server) handleBulkPauseJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBulkResumeJobs(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	if principal.Role == roleWorker {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot resume jobs")
 		return
@@ -602,7 +616,9 @@ func (s *Server) handleBulkResumeJobs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	var req BulkJobOperationRequest
-	if ok := decodeJSONBody(w, r, &req); !ok { return }
+	if ok := decodeJSONBody(w, r, &req); !ok {
+		return
+	}
 	if err := req.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
@@ -1254,7 +1270,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	pagination.NextCursor = nextCursor
 
 	writeJSON(w, http.StatusOK, ListRunsResponse{
-		Runs: runs,
+		Runs:       runs,
 		Pagination: pagination,
 	})
 }
@@ -1299,9 +1315,10 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) selectRunsForBulkOperation(ctx context.Context, principal principal, req BulkRunOperationRequest) ([]store.Run, error) {
 	if len(req.RunIDs) > 0 {
-		runs := make([]store.Run, 0, len(req.RunIDs))
-		for _, runID := range req.RunIDs {
-			run, _, err := s.store.GetRun(ctx, strings.TrimSpace(runID))
+		dedupedRunIDs := uniqueTrimmedStrings(req.RunIDs)
+		runs := make([]store.Run, 0, len(dedupedRunIDs))
+		for _, runID := range dedupedRunIDs {
+			run, _, err := s.store.GetRun(ctx, runID)
 			if err != nil {
 				return nil, err
 			}
@@ -1328,6 +1345,23 @@ func (s *Server) selectRunsForBulkOperation(ctx context.Context, principal princ
 		return nil, err
 	}
 	return runs, nil
+}
+
+func uniqueTrimmedStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
 }
 
 func (s *Server) handleBulkRequeueRuns(w http.ResponseWriter, r *http.Request) {
@@ -1773,7 +1807,9 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	if principal.Role != roleAdmin {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin access required")
 		return
@@ -1842,7 +1878,9 @@ func (s *Server) workerDetail(worker store.Worker, inflightRuns []store.Run) Wor
 
 func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	if principal.Role != roleAdmin {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin access required")
 		return
@@ -1863,7 +1901,9 @@ func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReactivateWorker(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	if principal.Role != roleAdmin {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin access required")
 		return
@@ -1888,7 +1928,9 @@ func (s *Server) handleReactivateWorker(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleDecommissionWorker(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.authenticateRequest(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	if principal.Role != roleAdmin {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "admin access required")
 		return

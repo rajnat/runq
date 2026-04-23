@@ -449,9 +449,6 @@ func (r UpsertTenantQuotaRequest) Validate() error {
 	if r.MaxActiveJobs < 0 {
 		return errors.New("max_active_jobs must be zero or greater")
 	}
-	if r.MaxInflight == 0 && r.MaxPendingRuns == 0 && r.MaxActiveJobs == 0 {
-		return errors.New("at least one tenant quota limit must be greater than zero")
-	}
 	return nil
 }
 

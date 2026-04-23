@@ -1354,6 +1354,11 @@ func (s *Store) RequeueRun(ctx context.Context, runID string, audit *AuditEventI
 	if source.jobDisabled && source.scheduleType != "once" {
 		return "", ErrConflict
 	}
+	switch source.status {
+	case "FAILED", "TIMED_OUT", "CANCELED":
+	default:
+		return "", ErrConflict
+	}
 	if err := lockTenantQuotaScope(ctx, tx, source.tenantID); err != nil {
 		return "", err
 	}
@@ -1363,11 +1368,6 @@ func (s *Store) RequeueRun(ctx context.Context, runID string, audit *AuditEventI
 	}
 	if err := enforceTenantPendingRunAdmission(ctx, tx, source.tenantID, quota); err != nil {
 		return "", err
-	}
-	switch source.status {
-	case "FAILED", "TIMED_OUT", "CANCELED":
-	default:
-		return "", ErrConflict
 	}
 
 	newRunID, err := newID("run")
