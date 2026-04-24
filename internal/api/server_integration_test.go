@@ -1199,6 +1199,69 @@ func TestListAuditEventsSupportsCursorPagination(t *testing.T) {
 	}
 }
 
+func TestListEndpointsCapRequestedPageSize(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-limit-job",
+		"tenant_id": "tenant-api",
+		"queue":     "api-limit-jobs",
+		"kind":      "http",
+		"payload":   map[string]any{"index": 0},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202 creating job, got %d", status)
+	}
+
+	var workerResp RegisterWorkerResponse
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-limit-test",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &workerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPut, httpServer.URL+"/v1/tenants/tenant-limit/quota", map[string]any{
+		"max_inflight": 1,
+	}, &TenantQuotaResponse{})
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 upserting quota, got %d", status)
+	}
+
+	jobsResp := ListJobsResponse{}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&limit=500", nil, &jobsResp)
+	if status != http.StatusOK || jobsResp.Pagination.Limit != 200 {
+		t.Fatalf("expected jobs limit cap 200, got status=%d resp=%+v", status, jobsResp.Pagination)
+	}
+
+	runsResp := ListRunsResponse{}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs?tenant_id=tenant-api&limit=500", nil, &runsResp)
+	if status != http.StatusOK || runsResp.Pagination.Limit != 200 {
+		t.Fatalf("expected runs limit cap 200, got status=%d resp=%+v", status, runsResp.Pagination)
+	}
+
+	workersResp := ListWorkersResponse{}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?limit=500", nil, &workersResp)
+	if status != http.StatusOK || workersResp.Pagination.Limit != 200 {
+		t.Fatalf("expected workers limit cap 200, got status=%d resp=%+v", status, workersResp.Pagination)
+	}
+
+	auditResp := ListAuditEventsResponse{}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/audit/events?limit=500", nil, &auditResp)
+	if status != http.StatusOK || auditResp.Pagination.Limit != 200 {
+		t.Fatalf("expected audit limit cap 200, got status=%d resp=%+v", status, auditResp.Pagination)
+	}
+}
+
 func TestListAuditEventsSupportsResourceAndActorFilters(t *testing.T) {
 	jobStore := openTestStore(t)
 	ctx := context.Background()

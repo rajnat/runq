@@ -94,6 +94,18 @@ type PageBoundary struct {
 	ID        string
 }
 
+func clampPageLimit(limit int) int {
+	const defaultPageLimit = 100
+	const maxPageLimit = 200
+	if limit <= 0 {
+		return defaultPageLimit
+	}
+	if limit > maxPageLimit {
+		return maxPageLimit
+	}
+	return limit
+}
+
 type UpdateJobInput struct {
 	Name                    *string
 	Queue                   *string
@@ -659,10 +671,7 @@ func (s *Store) ListJobsPage(ctx context.Context, filter JobFilter) ([]Job, bool
 		idArg := len(args)
 		query += fmt.Sprintf(" AND (j.created_at < $%d OR (j.created_at = $%d AND j.id < $%d))", createdAtArg, createdAtArg, idArg)
 	}
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	}
+	limit := clampPageLimit(filter.Limit)
 	query += fmt.Sprintf(" ORDER BY j.created_at DESC, j.id DESC LIMIT %d", limit+1)
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
@@ -1010,10 +1019,7 @@ func (s *Store) ListRunsPage(ctx context.Context, filter RunFilter) ([]Run, bool
 		idArg := len(args)
 		query += fmt.Sprintf(" AND (r.created_at < $%d OR (r.created_at = $%d AND r.id < $%d))", createdAtArg, createdAtArg, idArg)
 	}
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	}
+	limit := clampPageLimit(filter.Limit)
 	query += fmt.Sprintf(" ORDER BY r.created_at DESC, r.id DESC LIMIT %d", limit+1)
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
@@ -1596,10 +1602,7 @@ func (s *Store) ListWorkersPage(ctx context.Context, filter WorkerFilter) ([]Wor
 		idArg := len(args)
 		query += fmt.Sprintf(" AND (started_at < $%d OR (started_at = $%d AND id < $%d))", createdAtArg, createdAtArg, idArg)
 	}
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	}
+	limit := clampPageLimit(filter.Limit)
 	query += fmt.Sprintf(" ORDER BY started_at DESC, id DESC LIMIT %d", limit+1)
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
@@ -1866,10 +1869,7 @@ func (s *Store) ListAuditEventsPage(ctx context.Context, filter AuditEventFilter
 		query += fmt.Sprintf(" AND (event_time < $%d OR (event_time = $%d AND id < $%d))", eventTimeArg, eventTimeArg, idArg)
 	}
 
-	limit := filter.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
+	limit := clampPageLimit(filter.Limit)
 	args = append(args, limit+1)
 	query += fmt.Sprintf(" ORDER BY event_time DESC, id DESC LIMIT $%d", len(args))
 	if filter.Offset > 0 {

@@ -625,6 +625,18 @@ func paginationMeta(limit, offset, returned int, hasMore bool) PaginationMeta {
 	return meta
 }
 
+func clampPageLimit(limit int) int {
+	const defaultPageLimit = 100
+	const maxPageLimit = 200
+	if limit <= 0 {
+		return defaultPageLimit
+	}
+	if limit > maxPageLimit {
+		return maxPageLimit
+	}
+	return limit
+}
+
 type encodedCursor struct {
 	CreatedAt string `json:"created_at"`
 	ID        string `json:"id"`

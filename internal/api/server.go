@@ -264,6 +264,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
 		return
 	}
+	limit = clampPageLimit(limit)
 	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
@@ -1101,6 +1102,7 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
 		return
 	}
+	limit = clampPageLimit(limit)
 	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
@@ -1238,6 +1240,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
 		return
 	}
+	limit = clampPageLimit(limit)
 	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
@@ -1781,6 +1784,7 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
 		return
 	}
+	limit = clampPageLimit(limit)
 	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
