@@ -28,6 +28,8 @@ type contextKey string
 
 const principalContextKey contextKey = "principal"
 
+const workerSessionHeader = "X-Runq-Worker-Session"
+
 func parseAuthTokens(cfg config.APIConfig) (map[string]principal, error) {
 	spec := strings.TrimSpace(cfg.AuthTokens)
 	if spec == "" {

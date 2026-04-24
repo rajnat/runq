@@ -67,6 +67,7 @@ type RegisterWorkerRequest struct {
 
 type RegisterWorkerResponse struct {
 	WorkerID                  string `json:"worker_id"`
+	WorkerSessionToken        string `json:"worker_session_token"`
 	HeartbeatIntervalSeconds  int    `json:"heartbeat_interval_seconds"`
 	LeaseRenewIntervalSeconds int    `json:"lease_renew_interval_seconds"`
 }

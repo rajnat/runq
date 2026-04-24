@@ -2043,7 +2043,7 @@ func TestHeartbeatRejectsDuplicateRunIDs(t *testing.T) {
 		t.Fatalf("expected 201 registering worker, got %d", status)
 	}
 
-	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/heartbeat", map[string]any{
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/heartbeat", map[string]string{workerSessionHeader: workerResp.WorkerSessionToken}, map[string]any{
 		"running": []map[string]any{
 			{"run_id": "run-1", "lease_token": 1},
 			{"run_id": "run-1", "lease_token": 2},
@@ -2077,11 +2077,119 @@ func TestHeartbeatRejectsOversizedRunningSet(t *testing.T) {
 	for i := 0; i < 101; i++ {
 		running = append(running, map[string]any{"run_id": fmt.Sprintf("run-%03d", i), "lease_token": i + 1})
 	}
-	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/heartbeat", map[string]any{
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/heartbeat", map[string]string{workerSessionHeader: workerResp.WorkerSessionToken}, map[string]any{
 		"running": running,
 	}, &map[string]any{})
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400 for oversized heartbeat running set, got %d", status)
+	}
+}
+
+func TestRegisterWorkerReturnsSessionTokenAndRotatesIt(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var first RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &first)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+	if first.WorkerSessionToken == "" {
+		t.Fatal("expected worker session token")
+	}
+
+	var second RegisterWorkerResponse
+	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &second)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 re-registering worker, got %d", status)
+	}
+	if second.WorkerSessionToken == "" || second.WorkerSessionToken == first.WorkerSessionToken {
+		t.Fatalf("expected rotated worker session token, got first=%q second=%q", first.WorkerSessionToken, second.WorkerSessionToken)
+	}
+}
+
+func TestWorkerProtocolRequiresValidSessionToken(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var workerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &workerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/poll", map[string]any{"available_slots": 1}, &map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without session token, got %d", status)
+	}
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/poll", map[string]string{workerSessionHeader: "bad-token"}, map[string]any{"available_slots": 1}, &map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with invalid session token, got %d", status)
+	}
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/poll", map[string]string{workerSessionHeader: workerResp.WorkerSessionToken}, map[string]any{"available_slots": 1}, &map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 with valid session token, got %d", status)
+	}
+}
+
+func TestOldWorkerSessionIsInvalidAfterReregistration(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var first RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &first)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+	var second RegisterWorkerResponse
+	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &second)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 re-registering worker, got %d", status)
+	}
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+first.WorkerID+"/poll", map[string]string{workerSessionHeader: first.WorkerSessionToken}, map[string]any{"available_slots": 1}, &map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401 using rotated-out session token, got %d", status)
+	}
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+second.WorkerID+"/poll", map[string]string{workerSessionHeader: second.WorkerSessionToken}, map[string]any{"available_slots": 1}, &map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 using current session token, got %d", status)
 	}
 }
 
@@ -2151,7 +2259,7 @@ func TestWorkerTokenCannotOperateOnAnotherWorkerID(t *testing.T) {
 		t.Fatalf("expected 201 registering other worker, got %d", status)
 	}
 
-	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+otherResp.WorkerID+"/poll", map[string]any{
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+otherResp.WorkerID+"/poll", map[string]string{workerSessionHeader: workerResp.WorkerSessionToken}, map[string]any{
 		"available_slots": 1,
 	}, &map[string]any{})
 	if status != http.StatusForbidden {
@@ -3672,6 +3780,12 @@ func resetTablesForAPI(t *testing.T, jobStore *store.Store) {
 
 	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(989898)`); err != nil {
 		t.Fatalf("acquire reset lock: %v", err)
+	}
+	if _, err := tx.Exec(`
+		ALTER TABLE workers ADD COLUMN IF NOT EXISTS session_token_hash TEXT NOT NULL DEFAULT '';
+		ALTER TABLE workers ADD COLUMN IF NOT EXISTS session_issued_at TIMESTAMPTZ;
+	`); err != nil {
+		t.Fatalf("ensure worker session columns: %v", err)
 	}
 	if _, err := tx.Exec(`
 		CREATE TABLE IF NOT EXISTS api_idempotency_keys (

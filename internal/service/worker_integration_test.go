@@ -728,6 +728,12 @@ func resetTables(t *testing.T, jobStore *store.Store) {
 	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(989898)`); err != nil {
 		t.Fatalf("acquire reset lock: %v", err)
 	}
+	if _, err := tx.Exec(`
+		ALTER TABLE workers ADD COLUMN IF NOT EXISTS session_token_hash TEXT NOT NULL DEFAULT '';
+		ALTER TABLE workers ADD COLUMN IF NOT EXISTS session_issued_at TIMESTAMPTZ;
+	`); err != nil {
+		t.Fatalf("ensure worker session columns: %v", err)
+	}
 
 	_, err = tx.Exec(`
 		TRUNCATE TABLE audit_events, run_events, runs, job_schedules, workers, jobs, tenant_quotas RESTART IDENTITY CASCADE

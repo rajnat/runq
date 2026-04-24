@@ -2012,6 +2012,7 @@ func (s *Server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
 	s.metrics.IncCounter("runq_api_workers_registered_total")
 	writeJSON(w, http.StatusCreated, RegisterWorkerResponse{
 		WorkerID:                  resp.WorkerID,
+		WorkerSessionToken:        resp.WorkerSessionToken,
 		HeartbeatIntervalSeconds:  int(s.cfg.WorkerHeartbeatInterval / time.Second),
 		LeaseRenewIntervalSeconds: int(s.cfg.WorkerLeaseDuration / time.Second),
 	})
@@ -2029,7 +2030,7 @@ func (s *Server) handlePollWorker(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID")); !ok {
+	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID"), r.Header.Get(workerSessionHeader)); !ok {
 		return
 	}
 
@@ -2079,7 +2080,7 @@ func (s *Server) handleHeartbeatWorker(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID")); !ok {
+	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID"), r.Header.Get(workerSessionHeader)); !ok {
 		return
 	}
 
@@ -2129,7 +2130,7 @@ func (s *Server) handleCompleteRun(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID")); !ok {
+	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID"), r.Header.Get(workerSessionHeader)); !ok {
 		return
 	}
 
@@ -2176,7 +2177,7 @@ func (s *Server) handleFailRun(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID")); !ok {
+	if ok := s.authorizeWorkerIdentity(ctx, w, principal, r.PathValue("workerID"), r.Header.Get(workerSessionHeader)); !ok {
 		return
 	}
 
@@ -2244,15 +2245,11 @@ func createJobRequestHash(input store.CreateJobInput) (string, error) {
 	return fmt.Sprintf("%x", sum[:]), nil
 }
 
-func (s *Server) authorizeWorkerIdentity(ctx context.Context, w http.ResponseWriter, principal principal, workerID string) bool {
-	if principal.Role != roleWorker {
-		return true
-	}
-
+func (s *Server) authorizeWorkerIdentity(ctx context.Context, w http.ResponseWriter, principal principal, workerID string, sessionToken string) bool {
 	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	worker, err := s.store.GetWorker(lookupCtx, workerID)
+	authState, err := s.store.GetWorkerAuthState(lookupCtx, workerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "worker not found")
@@ -2262,8 +2259,21 @@ func (s *Server) authorizeWorkerIdentity(ctx context.Context, w http.ResponseWri
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load worker")
 		return false
 	}
-	if worker.Name != principal.WorkerName {
+	if principal.Role == roleWorker && authState.Name != principal.WorkerName {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker token does not match requested worker identity")
+		return false
+	}
+	if strings.TrimSpace(sessionToken) == "" {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing worker session token")
+		return false
+	}
+	if _, err := s.store.ValidateWorkerSession(lookupCtx, workerID, sessionToken); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid worker session token")
+			return false
+		}
+		s.logger.Printf("validate worker session failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to validate worker session")
 		return false
 	}
 	return true

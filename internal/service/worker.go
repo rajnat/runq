@@ -28,9 +28,10 @@ type WorkerProcess struct {
 	metrics    *observability.Registry
 	assignWG   sync.WaitGroup
 
-	mu       sync.Mutex
-	workerID string
-	running  map[string]*activeRun
+	mu                 sync.Mutex
+	workerID           string
+	workerSessionToken string
+	running            map[string]*activeRun
 }
 
 type activeRun struct {
@@ -50,6 +51,7 @@ type registerWorkerRequest struct {
 
 type registerWorkerResponse struct {
 	WorkerID                  string `json:"worker_id"`
+	WorkerSessionToken        string `json:"worker_session_token"`
 	HeartbeatIntervalSeconds  int    `json:"heartbeat_interval_seconds"`
 	LeaseRenewIntervalSeconds int    `json:"lease_renew_interval_seconds"`
 }
@@ -113,13 +115,14 @@ func (w *WorkerProcess) Run(ctx context.Context) error {
 	runCtx, cancelAssignments := context.WithCancel(ctx)
 	defer cancelAssignments()
 
-	workerID, err := w.register(ctx)
+	workerID, sessionToken, err := w.register(ctx)
 	if err != nil {
 		return err
 	}
 
 	w.mu.Lock()
 	w.workerID = workerID
+	w.workerSessionToken = sessionToken
 	w.mu.Unlock()
 
 	w.logger.Printf("registered worker_id=%s queues=%v max_concurrency=%d", workerID, w.cfg.Queues, w.cfg.MaxConcurrency)
@@ -152,7 +155,7 @@ func (w *WorkerProcess) Run(ctx context.Context) error {
 	}
 }
 
-func (w *WorkerProcess) register(ctx context.Context) (string, error) {
+func (w *WorkerProcess) register(ctx context.Context) (string, string, error) {
 	req := registerWorkerRequest{
 		Name:           w.cfg.Name,
 		Queues:         w.cfg.Queues,
@@ -163,13 +166,13 @@ func (w *WorkerProcess) register(ctx context.Context) (string, error) {
 
 	var resp registerWorkerResponse
 	if err := w.doJSON(ctx, http.MethodPost, "/v1/workers/register", req, &resp); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if interval := serverHeartbeatInterval(resp); interval > 0 {
 		w.cfg.HeartbeatInterval = interval
 	}
 
-	return resp.WorkerID, nil
+	return resp.WorkerID, resp.WorkerSessionToken, nil
 }
 
 func (w *WorkerProcess) pollAndDispatch(ctx context.Context, runCtx context.Context) error {
@@ -409,6 +412,9 @@ func (w *WorkerProcess) doJSON(ctx context.Context, method, path string, request
 	if token := strings.TrimSpace(w.cfg.AuthToken); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	if sessionToken := strings.TrimSpace(w.getWorkerSessionToken()); sessionToken != "" && path != "/v1/workers/register" {
+		req.Header.Set("X-Runq-Worker-Session", sessionToken)
+	}
 	observability.Inject(ctx, req.Header)
 
 	resp, err := w.httpClient.Do(req)
@@ -449,6 +455,12 @@ func (w *WorkerProcess) getWorkerID() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.workerID
+}
+
+func (w *WorkerProcess) getWorkerSessionToken() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.workerSessionToken
 }
 
 func (w *WorkerProcess) runningCount() int {

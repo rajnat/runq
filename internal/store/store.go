@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -159,6 +161,40 @@ func persistIdempotentCreateJob(tx *sql.Tx, ctx context.Context, tenantID string
 	return nil
 }
 
+func hashWorkerSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Store) GetWorkerAuthState(ctx context.Context, workerID string) (WorkerAuthState, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, name, session_token_hash, session_issued_at
+		FROM workers
+		WHERE id = $1
+	`, workerID)
+	var auth WorkerAuthState
+	var issuedAt sql.NullTime
+	if err := row.Scan(&auth.WorkerID, &auth.Name, &auth.SessionTokenHash, &issuedAt); err != nil {
+		return WorkerAuthState{}, err
+	}
+	if issuedAt.Valid {
+		value := issuedAt.Time.UTC()
+		auth.SessionIssuedAt = &value
+	}
+	return auth, nil
+}
+
+func (s *Store) ValidateWorkerSession(ctx context.Context, workerID, sessionToken string) (WorkerAuthState, error) {
+	auth, err := s.GetWorkerAuthState(ctx, workerID)
+	if err != nil {
+		return WorkerAuthState{}, err
+	}
+	if subtle.ConstantTimeCompare([]byte(auth.SessionTokenHash), []byte(hashWorkerSessionToken(sessionToken))) != 1 {
+		return WorkerAuthState{}, ErrConflict
+	}
+	return auth, nil
+}
+
 type UpdateJobInput struct {
 	Name                    *string
 	Queue                   *string
@@ -183,19 +219,27 @@ type RegisterWorkerInput struct {
 }
 
 type RegisterWorkerResult struct {
-	WorkerID string
+	WorkerID           string
+	WorkerSessionToken string
 }
 
 type Worker struct {
 	ID              string         `json:"id"`
 	Name            string         `json:"name"`
-	Queues          []string       `json:"queues,omitempty"`
-	Capabilities    map[string]any `json:"capabilities,omitempty"`
+	Queues          []string       `json:"queues"`
+	Capabilities    map[string]any `json:"capabilities"`
 	Status          string         `json:"status"`
 	MaxConcurrency  int            `json:"max_concurrency"`
 	LastHeartbeatAt time.Time      `json:"last_heartbeat_at"`
 	StartedAt       time.Time      `json:"started_at"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
+}
+
+type WorkerAuthState struct {
+	WorkerID         string
+	Name             string
+	SessionTokenHash string
+	SessionIssuedAt  *time.Time
 }
 
 type WorkerAssignment struct {
@@ -1583,6 +1627,11 @@ func (s *Store) RegisterWorker(ctx context.Context, input RegisterWorkerInput) (
 	if err != nil {
 		return RegisterWorkerResult{}, fmt.Errorf("marshal metadata: %w", err)
 	}
+	sessionToken, err := newID("ws")
+	if err != nil {
+		return RegisterWorkerResult{}, err
+	}
+	sessionTokenHash := hashWorkerSessionToken(sessionToken)
 
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1608,9 +1657,11 @@ func (s *Store) RegisterWorker(ctx context.Context, input RegisterWorkerInput) (
 			    status = 'healthy',
 			    last_heartbeat_at = $5,
 			    started_at = $5,
-			    metadata = $6::jsonb
+			    metadata = $6::jsonb,
+			    session_token_hash = $7,
+			    session_issued_at = $5
 			WHERE id = $1
-		`, workerID, pqArray(input.Queues), string(capabilitiesJSON), input.MaxConcurrency, now, string(metadataJSON)); err != nil {
+		`, workerID, pqArray(input.Queues), string(capabilitiesJSON), input.MaxConcurrency, now, string(metadataJSON), sessionTokenHash); err != nil {
 			return RegisterWorkerResult{}, fmt.Errorf("update worker: %w", err)
 		}
 	case errors.Is(err, sql.ErrNoRows):
@@ -1621,10 +1672,10 @@ func (s *Store) RegisterWorker(ctx context.Context, input RegisterWorkerInput) (
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO workers (
 				id, name, queues, capabilities, max_concurrency, status,
-				last_heartbeat_at, started_at, metadata
+				last_heartbeat_at, started_at, metadata, session_token_hash, session_issued_at
 			)
-			VALUES ($1, $2, $3, $4::jsonb, $5, 'healthy', $6, $6, $7::jsonb)
-		`, workerID, input.Name, pqArray(input.Queues), string(capabilitiesJSON), input.MaxConcurrency, now, string(metadataJSON)); err != nil {
+			VALUES ($1, $2, $3, $4::jsonb, $5, 'healthy', $6, $6, $7::jsonb, $8, $6)
+		`, workerID, input.Name, pqArray(input.Queues), string(capabilitiesJSON), input.MaxConcurrency, now, string(metadataJSON), sessionTokenHash); err != nil {
 			return RegisterWorkerResult{}, fmt.Errorf("insert worker: %w", err)
 		}
 	default:
@@ -1635,7 +1686,7 @@ func (s *Store) RegisterWorker(ctx context.Context, input RegisterWorkerInput) (
 		return RegisterWorkerResult{}, fmt.Errorf("commit register worker tx: %w", err)
 	}
 
-	return RegisterWorkerResult{WorkerID: workerID}, nil
+	return RegisterWorkerResult{WorkerID: workerID, WorkerSessionToken: sessionToken}, nil
 }
 
 func (s *Store) ListWorkers(ctx context.Context) ([]Worker, error) {
