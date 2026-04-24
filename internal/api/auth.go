@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/eswar/runq/internal/config"
 )
@@ -95,8 +96,23 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (pr
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		return principal{}, false
 	}
+	if !s.allowAuthenticatedRequest(token, authPrincipal) {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "rate limit exceeded")
+		return principal{}, false
+	}
 
 	return authPrincipal, true
+}
+
+func (s *Server) allowAuthenticatedRequest(token string, principal principal) bool {
+	now := time.Now()
+	if !s.tokenLimiter.Allow(token, now) {
+		return false
+	}
+	if principal.Role == roleTenant && !s.tenantLimiter.Allow(principal.TenantID, now) {
+		return false
+	}
+	return true
 }
 
 func withPrincipal(ctx context.Context, p principal) context.Context {

@@ -1855,6 +1855,56 @@ func TestExplicitInsecureDevModeAllowsAuthBypass(t *testing.T) {
 	}
 }
 
+func TestRequestsAreRateLimitedPerToken(t *testing.T) {
+	server, err := NewServer(config.APIConfig{
+		AuthTokens:               adminToken + ":admin",
+		TokenRateLimitPerSecond:  1,
+		TokenRateLimitBurst:      1,
+		TenantRateLimitPerSecond: 100,
+		TenantRateLimitBurst:     100,
+	}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &AuthMeResponse{})
+	if status != http.StatusOK {
+		t.Fatalf("expected first request to pass, got %d", status)
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &map[string]any{})
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("expected second request to be rate limited, got %d", status)
+	}
+}
+
+func TestRequestsAreRateLimitedPerTenantAcrossTokens(t *testing.T) {
+	server, err := NewServer(config.APIConfig{
+		AuthTokens:               "tenant-a:tenant:tenant-api,tenant-b:tenant:tenant-api",
+		TokenRateLimitPerSecond:  100,
+		TokenRateLimitBurst:      100,
+		TenantRateLimitPerSecond: 1,
+		TenantRateLimitBurst:     1,
+	}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), "tenant-a", http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &AuthMeResponse{})
+	if status != http.StatusOK {
+		t.Fatalf("expected first tenant request to pass, got %d", status)
+	}
+	status = doJSONRequest(t, httpServer.Client(), "tenant-b", http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &map[string]any{})
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("expected second tenant request to be rate limited, got %d", status)
+	}
+}
+
 func TestRecoveredPanicReturnsStructuredInternalError(t *testing.T) {
 	server, err := NewServer(config.APIConfig{AuthTokens: adminToken + ":admin"}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
 	if err != nil {
