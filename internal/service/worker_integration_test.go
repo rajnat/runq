@@ -272,7 +272,7 @@ func TestWorkerProcessRegistersConfiguredCapabilities(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, http.StatusCreated, registerWorkerResponse{WorkerID: "worker-test"})
+		writeJSON(w, http.StatusCreated, registerWorkerResponse{WorkerID: "worker-test", WorkerSessionToken: "session-test"})
 	}))
 	defer httpServer.Close()
 
@@ -287,13 +287,16 @@ func TestWorkerProcessRegistersConfiguredCapabilities(t *testing.T) {
 		ExecutionTime:     time.Second,
 	}, observability.NewRegistry())
 
-	workerID, err := worker.register(context.Background())
+	workerID, sessionToken, err := worker.register(context.Background())
 	if err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 
 	if workerID != "worker-test" {
 		t.Fatalf("expected worker id to round-trip, got %s", workerID)
+	}
+	if sessionToken == "" {
+		t.Fatal("expected worker session token to round-trip")
 	}
 	shellEnabled, shellOK := captured.Capabilities["shell"].(bool)
 	httpEnabled, httpOK := captured.Capabilities["http"].(bool)
