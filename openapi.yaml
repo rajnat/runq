@@ -162,6 +162,60 @@ paths:
               schema:
                 $ref: '#/components/schemas/BulkJobOperationResponse'
 
+  /v1/jobs/{jobID}/disable:
+    post:
+      tags: [jobs]
+      summary: Disable a job
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/jobs/{jobID}/enable:
+    post:
+      tags: [jobs]
+      summary: Enable a job
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/jobs/{jobID}/pause:
+    post:
+      tags: [jobs]
+      summary: Pause a job
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/jobs/{jobID}/resume:
+    post:
+      tags: [jobs]
+      summary: Resume a job
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/jobs/{jobID}/trigger:
+    post:
+      tags: [jobs]
+      summary: Trigger a job immediately
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+
+  /v1/jobs/{jobID}/cancel:
+    post:
+      tags: [jobs]
+      summary: Cancel a job and pending/running runs
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+
   /v1/jobs/enable:
     post:
       tags: [jobs]
@@ -317,6 +371,38 @@ paths:
         '200': { $ref: '#/components/responses/JSONGeneric' }
         '202': { $ref: '#/components/responses/JSONGeneric' }
 
+  /v1/runs/{runID}/cancel:
+    post:
+      tags: [runs]
+      summary: Cancel a single run
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /v1/runs/{runID}/requeue:
+    post:
+      tags: [runs]
+      summary: Requeue a single run
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
+  /v1/runs/{runID}/redrive:
+    post:
+      tags: [runs]
+      summary: Redrive a single dead-lettered run
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '202': { $ref: '#/components/responses/JSONGeneric' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+
   /v1/workers:
     get:
       tags: [workers]
@@ -393,9 +479,97 @@ paths:
         content:
           application/json:
             schema:
-              type: object
+              $ref: '#/components/schemas/RegisterWorkerRequest'
       responses:
-        '201': { $ref: '#/components/responses/JSONGeneric' }
+        '201':
+          description: Registered worker
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterWorkerResponse'
+
+  /v1/workers/{workerID}/poll:
+    post:
+      tags: [workers]
+      summary: Poll assignments for a worker
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+        - $ref: '#/components/parameters/WorkerSessionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PollWorkerRequest'
+      responses:
+        '200':
+          description: Worker assignments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PollWorkerResponse'
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/workers/{workerID}/heartbeat:
+    post:
+      tags: [workers]
+      summary: Record a worker heartbeat
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+        - $ref: '#/components/parameters/WorkerSessionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /v1/workers/{workerID}/complete:
+    post:
+      tags: [workers]
+      summary: Complete a claimed run
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+        - $ref: '#/components/parameters/WorkerSessionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteRunRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /v1/workers/{workerID}/fail:
+    post:
+      tags: [workers]
+      summary: Fail a claimed run
+      parameters:
+        - $ref: '#/components/parameters/WorkerID'
+        - $ref: '#/components/parameters/WorkerSessionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FailRunRequest'
+      responses:
+        '200': { $ref: '#/components/responses/JSONGeneric' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
 
   /v1/tenants/quotas:
     get:
@@ -485,6 +659,11 @@ components:
     WorkerID:
       name: workerID
       in: path
+      required: true
+      schema: { type: string }
+    WorkerSessionHeader:
+      name: X-Runq-Worker-Session
+      in: header
       required: true
       schema: { type: string }
     Limit:
@@ -709,6 +888,124 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Job' }
         pagination: { $ref: '#/components/schemas/PaginationMeta' }
+
+    UpdateJobRequest:
+      type: object
+      properties:
+        name: { type: string }
+        queue: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+        priority: { type: integer }
+        max_retries: { type: integer }
+        timeout_seconds: { type: integer }
+        retry_backoff_base_seconds: { type: integer }
+        concurrency_key: { type: string }
+
+    RegisterWorkerRequest:
+      type: object
+      properties:
+        name: { type: string }
+        queues:
+          type: array
+          items: { type: string }
+        capabilities:
+          type: object
+          additionalProperties: true
+        max_concurrency: { type: integer }
+        metadata:
+          type: object
+          additionalProperties: true
+      required: [name, queues, capabilities, max_concurrency]
+
+    RegisterWorkerResponse:
+      type: object
+      properties:
+        worker_id: { type: string }
+        worker_session_token: { type: string }
+        heartbeat_interval_seconds: { type: integer }
+        lease_renew_interval_seconds: { type: integer }
+      required: [worker_id, worker_session_token, heartbeat_interval_seconds, lease_renew_interval_seconds]
+
+    PollWorkerRequest:
+      type: object
+      properties:
+        available_slots: { type: integer }
+      required: [available_slots]
+
+    PollWorkerResponse:
+      type: object
+      properties:
+        assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkerAssignmentResponse'
+      required: [assignments]
+
+    WorkerAssignmentResponse:
+      type: object
+      properties:
+        run_id: { type: string }
+        job_id: { type: string }
+        kind: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        timeout_seconds: { type: integer }
+        lease_token: { type: integer }
+        lease_expires_at: { type: string, format: date-time }
+      required: [run_id, job_id, kind, payload, timeout_seconds, lease_token, lease_expires_at]
+
+    HeartbeatRequest:
+      type: object
+      properties:
+        running:
+          type: array
+          items:
+            $ref: '#/components/schemas/HeartbeatRun'
+      required: [running]
+
+    HeartbeatRun:
+      type: object
+      properties:
+        run_id: { type: string }
+        lease_token: { type: integer }
+        progress:
+          type: object
+          additionalProperties: true
+      required: [run_id, lease_token]
+
+    CompleteRunRequest:
+      type: object
+      properties:
+        run_id: { type: string }
+        lease_token: { type: integer }
+        status: { type: string, enum: [SUCCEEDED] }
+        result:
+          type: object
+          additionalProperties: true
+      required: [run_id, lease_token, status]
+
+    FailRunRequest:
+      type: object
+      properties:
+        run_id: { type: string }
+        lease_token: { type: integer }
+        error_code: { type: string }
+        error_message: { type: string }
+        retryable: { type: boolean }
+      required: [run_id, lease_token, error_code]
+
+    Schedule:
+      type: object
+      properties:
+        type: { type: string }
+        cron: { type: string }
+        timezone: { type: string }
+        run_at: { type: string, format: date-time }
 
     ListRunsResponse:
       type: object
