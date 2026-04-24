@@ -53,8 +53,8 @@ func New(cfg AppConfig, stdout, stderr io.Writer) *App {
 }
 
 func (a *App) Run(args []string) error {
-	if len(args) == 0 {
-		_, _ = fmt.Fprintln(a.stdout, "usage: runq <auth|config|jobs|runs|workers|quotas> ...")
+	if len(args) == 0 || isHelpArg(args[0]) {
+		a.printTopLevelHelp()
 		return nil
 	}
 	switch args[0] {
@@ -73,6 +73,15 @@ func (a *App) Run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
+}
+
+func isHelpArg(arg string) bool {
+	arg = strings.TrimSpace(arg)
+	return arg == "help" || arg == "-h" || arg == "--help"
+}
+
+func (a *App) printTopLevelHelp() {
+	_, _ = fmt.Fprintln(a.stdout, "usage: runq <auth|config|jobs|runs|workers|quotas> ...")
 }
 
 func (a *App) runAuth(args []string) error {
@@ -103,15 +112,20 @@ func (a *App) runConfig(args []string) error {
 }
 
 func (a *App) runJobs(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: runq jobs <list|get|create|update|disable>")
+	if len(args) == 0 || isHelpArg(args[0]) {
+		_, _ = fmt.Fprintln(a.stdout, "usage: runq jobs <list|get|create|update|disable|enable|pause|resume|trigger|cancel>")
+		return nil
 	}
 	switch args[0] {
 	case "list":
+		if len(args) == 2 && isHelpArg(args[1]) {
+			_, _ = fmt.Fprintln(a.stdout, "usage: runq jobs list [--field value ...]")
+			return nil
+		}
 		query := url.Values{}
 		for i := 1; i < len(args); i += 2 {
 			if i+1 >= len(args) || !strings.HasPrefix(args[i], "--") {
-				return errors.New("usage: runq jobs list [--tenant-id <tenant>] [--queue <queue>]")
+				return errors.New("usage: runq jobs list [--field value ...]")
 			}
 			query.Set(strings.ReplaceAll(strings.TrimPrefix(args[i], "--"), "-", "_"), args[i+1])
 		}

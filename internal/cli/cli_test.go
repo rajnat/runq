@@ -72,6 +72,37 @@ func TestRunConfigShow(t *testing.T) {
 	}
 }
 
+func TestRunHelpCommands(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	app := New(AppConfig{}, &stdout, &stderr)
+
+	if err := app.Run([]string{"--help"}); err != nil {
+		t.Fatalf("top-level help: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "usage: runq <auth|config|jobs|runs|workers|quotas>") {
+		t.Fatalf("unexpected top-level help: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := app.Run([]string{"jobs", "--help"}); err != nil {
+		t.Fatalf("jobs help: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "usage: runq jobs <list|get|create|update|disable|enable|pause|resume|trigger|cancel>") {
+		t.Fatalf("unexpected jobs help: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := app.Run([]string{"jobs", "list", "--help"}); err != nil {
+		t.Fatalf("jobs list help: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "usage: runq jobs list [--field value ...]") {
+		t.Fatalf("unexpected jobs list help: %q", stdout.String())
+	}
+}
+
 func TestRunJobsCommands(t *testing.T) {
 	jobStore := openTestStoreForCLI(t)
 	resetTablesForCLI(t, jobStore)
