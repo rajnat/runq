@@ -17,6 +17,7 @@ help:
 	@printf "  down          Stop local Docker dependencies\n"
 	@printf "  demo          Run demo script\n"
 	@printf "  e2e-smoke     Run end-to-end smoke script\n"
+	@printf "  package-cli   Package the runq CLI release artifacts\n"
 
 .PHONY: build
 build:

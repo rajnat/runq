@@ -13,6 +13,8 @@ It provides:
 ## Repository layout
 
 - `cmd/api-server` — HTTP API process
+- `cmd/runq` — unified operator CLI
+- `cmd/migrate` — schema migration runner
 - `cmd/scheduler` — materializes due runs and assigns pending work
 - `cmd/reaper` — recovers expired/timed-out work
 - `cmd/worker` — sample worker process using the public worker protocol
@@ -116,7 +118,9 @@ curl -s 'http://localhost:8080/v1/jobs/lookup?tenant_id=tenant-api&dedupe_key=my
 See:
 - `docs/architecture.md`
 - `docs/api-usage.md`
+- `docs/api-examples.md`
 - `docs/worker-protocol.md`
 - `docs/operations.md`
 - `docs/observability.md`
 - `docs/security.md`
+- `docs/cli-release.md`

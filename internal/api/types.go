@@ -397,7 +397,14 @@ func (r RegisterWorkerRequest) Validate() error {
 	if strings.TrimSpace(r.Name) == "" {
 		return errors.New("name is required")
 	}
-	if len(r.Queues) == 0 {
+	hasQueue := false
+	for _, queue := range r.Queues {
+		if strings.TrimSpace(queue) != "" {
+			hasQueue = true
+			break
+		}
+	}
+	if !hasQueue {
 		return errors.New("at least one queue is required")
 	}
 	if r.MaxConcurrency <= 0 {
