@@ -1767,6 +1767,13 @@ func TestNewServerReturnsConfigError(t *testing.T) {
 
 func TestEmptyAuthConfigDoesNotGrantImplicitAdminAccess(t *testing.T) {
 	server, err := NewServer(config.APIConfig{}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
+	if err == nil {
+		t.Fatalf("expected config error, got server=%v", server)
+	}
+}
+
+func TestExplicitInsecureDevModeAllowsAuthBypass(t *testing.T) {
+	server, err := NewServer(config.APIConfig{InsecureDevMode: true}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -1774,9 +1781,13 @@ func TestEmptyAuthConfigDoesNotGrantImplicitAdminAccess(t *testing.T) {
 	httpServer := httptest.NewServer(server.mux)
 	defer httpServer.Close()
 
-	status := doJSONRequest(t, httpServer.Client(), "", http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &map[string]any{})
-	if status != http.StatusUnauthorized {
-		t.Fatalf("expected 401 without configured auth tokens, got %d", status)
+	var resp AuthMeResponse
+	status := doJSONRequest(t, httpServer.Client(), "", http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &resp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 in explicit insecure dev mode, got %d", status)
+	}
+	if resp.Role != "admin" {
+		t.Fatalf("expected admin role in insecure dev mode, got %+v", resp)
 	}
 }
 

@@ -79,6 +79,10 @@ func parseAuthTokens(cfg config.APIConfig) (map[string]principal, error) {
 }
 
 func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (principal, bool) {
+	if len(s.authTokens) == 0 && s.cfg.InsecureDevMode {
+		return principal{Role: roleAdmin}, true
+	}
+
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	if !strings.HasPrefix(header, "Bearer ") {
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing bearer token")

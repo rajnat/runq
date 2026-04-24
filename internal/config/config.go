@@ -20,6 +20,7 @@ type APIConfig struct {
 	Address                 string
 	DBConnString            string
 	AuthTokens              string
+	InsecureDevMode         bool
 	MetricsAddress          string
 	TraceEndpoint           string
 	WorkerHeartbeatInterval time.Duration
@@ -56,11 +57,26 @@ type WorkerConfig struct {
 	TraceEndpoint     string
 }
 
+func (c APIConfig) Validate() error {
+	if strings.TrimSpace(c.AuthTokens) == "" && !c.InsecureDevMode {
+		return fmt.Errorf("RUNQ_API_TOKENS is required unless RUNQ_INSECURE_DEV_MODE=true")
+	}
+	return nil
+}
+
+func (c WorkerConfig) Validate() error {
+	if strings.TrimSpace(c.AuthToken) == "" {
+		return fmt.Errorf("RUNQ_WORKER_AUTH_TOKEN is required")
+	}
+	return nil
+}
+
 func LoadAPI() APIConfig {
 	return APIConfig{
 		Address:                 envOrDefault("RUNQ_API_ADDR", defaultAPIAddr),
 		DBConnString:            envOrDefault("RUNQ_DATABASE_URL", defaultDBConnString),
 		AuthTokens:              envOrDefault("RUNQ_API_TOKENS", ""),
+		InsecureDevMode:         boolEnvOrDefault("RUNQ_INSECURE_DEV_MODE", false),
 		MetricsAddress:          envOrDefault("RUNQ_API_METRICS_ADDR", ":9090"),
 		TraceEndpoint:           envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
 		WorkerHeartbeatInterval: durationEnvOrDefault("RUNQ_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5*time.Second),
@@ -109,6 +125,21 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func boolEnvOrDefault(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func durationEnvOrDefault(key string, fallback time.Duration) time.Duration {

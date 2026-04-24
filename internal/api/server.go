@@ -28,6 +28,9 @@ type Server struct {
 }
 
 func NewServer(cfg config.APIConfig, logger *log.Logger, jobStore *store.Store, metrics *observability.Registry) (*Server, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validate api config: %w", err)
+	}
 	authTokens, err := parseAuthTokens(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("parse api auth tokens: %w", err)
