@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -1894,6 +1895,67 @@ func TestMetricsAreNotExposedOnPublicAPIMux(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected public metrics path to be unavailable, got %d", resp.StatusCode)
+	}
+}
+
+func TestHeartbeatRejectsDuplicateRunIDs(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var workerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 2,
+	}, &workerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/heartbeat", map[string]any{
+		"running": []map[string]any{
+			{"run_id": "run-1", "lease_token": 1},
+			{"run_id": "run-1", "lease_token": 2},
+		},
+	}, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for duplicate heartbeat run ids, got %d", status)
+	}
+}
+
+func TestHeartbeatRejectsOversizedRunningSet(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var workerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 200,
+	}, &workerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	running := make([]map[string]any, 0, 101)
+	for i := 0; i < 101; i++ {
+		running = append(running, map[string]any{"run_id": fmt.Sprintf("run-%03d", i), "lease_token": i + 1})
+	}
+	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/heartbeat", map[string]any{
+		"running": running,
+	}, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for oversized heartbeat running set, got %d", status)
 	}
 }
 

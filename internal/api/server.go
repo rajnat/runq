@@ -2077,13 +2077,13 @@ func (s *Server) handleHeartbeatWorker(w http.ResponseWriter, r *http.Request) {
 	if ok := decodeJSONBody(w, r, &req); !ok {
 		return
 	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
 
 	items := make([]store.HeartbeatUpdate, 0, len(req.Running))
 	for _, item := range req.Running {
-		if item.RunID == "" || item.LeaseToken <= 0 {
-			writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "each running item must include run_id and lease_token")
-			return
-		}
 		items = append(items, store.HeartbeatUpdate{
 			RunID:      item.RunID,
 			LeaseToken: item.LeaseToken,

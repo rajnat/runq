@@ -420,6 +420,23 @@ func (r PollWorkerRequest) Validate() error {
 	return nil
 }
 
+func (r HeartbeatRequest) Validate() error {
+	if len(r.Running) > 100 {
+		return errors.New("running must contain at most 100 items")
+	}
+	seen := make(map[string]struct{}, len(r.Running))
+	for _, item := range r.Running {
+		if strings.TrimSpace(item.RunID) == "" || item.LeaseToken <= 0 {
+			return errors.New("each running item must include run_id and lease_token")
+		}
+		if _, exists := seen[item.RunID]; exists {
+			return errors.New("running must not contain duplicate run_id values")
+		}
+		seen[item.RunID] = struct{}{}
+	}
+	return nil
+}
+
 func (r CompleteRunRequest) Validate() error {
 	if strings.TrimSpace(r.RunID) == "" {
 		return errors.New("run_id is required")
