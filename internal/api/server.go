@@ -87,7 +87,6 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) routes() {
 	s.handle("GET /healthz", s.handleHealth)
 	s.handle("GET /readyz", s.handleReady)
-	s.mux.Handle("/metrics", s.metrics.Handler())
 	s.handle("GET /v1/auth/me", s.handleAuthMe)
 	s.handle("GET /v1/jobs", s.handleListJobs)
 	s.handle("GET /v1/jobs/lookup", s.handleLookupJob)

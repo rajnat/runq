@@ -1878,6 +1878,25 @@ func TestRecoveredPanicReturnsStructuredInternalError(t *testing.T) {
 	}
 }
 
+func TestMetricsAreNotExposedOnPublicAPIMux(t *testing.T) {
+	server, err := NewServer(config.APIConfig{AuthTokens: adminToken + ":admin"}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	resp, err := httpServer.Client().Get(httpServer.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("get metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected public metrics path to be unavailable, got %d", resp.StatusCode)
+	}
+}
+
 func TestWorkerTokenCannotRegisterDifferentWorkerName(t *testing.T) {
 	jobStore := openTestStore(t)
 
