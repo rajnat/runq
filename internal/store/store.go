@@ -26,6 +26,7 @@ type Store struct {
 var ErrConflict = errors.New("state conflict")
 var ErrAlreadyExists = errors.New("already exists")
 var ErrQuotaExceeded = errors.New("tenant quota exceeded")
+var ErrIdempotencyConflict = errors.New("idempotency key conflict")
 
 type CreateJobInput struct {
 	Name                    string
@@ -43,6 +44,8 @@ type CreateJobInput struct {
 	TimeoutSeconds          int
 	RetryBackoffBaseSeconds int
 	DedupeKey               string
+	IdempotencyKey          string
+	IdempotencyRequestHash  string
 }
 
 type CreateJobResult struct {
@@ -104,6 +107,56 @@ func clampPageLimit(limit int) int {
 		return maxPageLimit
 	}
 	return limit
+}
+
+func loadIdempotentCreateJob(tx *sql.Tx, ctx context.Context, tenantID string, input CreateJobInput) (CreateJobResult, bool, error) {
+	key := strings.TrimSpace(input.IdempotencyKey)
+	if key == "" {
+		return CreateJobResult{}, false, nil
+	}
+	var requestHash string
+	var responseBody []byte
+	err := tx.QueryRowContext(ctx, `
+		SELECT request_hash, response_body
+		FROM api_idempotency_keys
+		WHERE tenant_id = $1 AND operation = 'create_job' AND idempotency_key = $2
+	`, tenantID, key).Scan(&requestHash, &responseBody)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CreateJobResult{}, false, nil
+	}
+	if err != nil {
+		return CreateJobResult{}, false, fmt.Errorf("load idempotency key: %w", err)
+	}
+	if requestHash != input.IdempotencyRequestHash {
+		return CreateJobResult{}, false, ErrIdempotencyConflict
+	}
+	var result CreateJobResult
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return CreateJobResult{}, false, fmt.Errorf("decode idempotency response: %w", err)
+	}
+	return result, true, nil
+}
+
+func persistIdempotentCreateJob(tx *sql.Tx, ctx context.Context, tenantID string, input CreateJobInput, result CreateJobResult) error {
+	key := strings.TrimSpace(input.IdempotencyKey)
+	if key == "" {
+		return nil
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal idempotency response: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO api_idempotency_keys (tenant_id, operation, idempotency_key, request_hash, response_status, response_body)
+		VALUES ($1, 'create_job', $2, $3, 202, $4::jsonb)
+	`, tenantID, key, input.IdempotencyRequestHash, string(body))
+	if err != nil {
+		if isUniqueViolation(err, "api_idempotency_keys_pkey") {
+			return ErrIdempotencyConflict
+		}
+		return fmt.Errorf("persist idempotency key: %w", err)
+	}
+	return nil
 }
 
 type UpdateJobInput struct {
@@ -467,6 +520,11 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 		return CreateJobResult{}, err
 	}
 	tenantID := defaultTenantID(input.TenantID)
+	if replayed, ok, err := loadIdempotentCreateJob(tx, ctx, tenantID, input); err != nil {
+		return CreateJobResult{}, err
+	} else if ok {
+		return replayed, nil
+	}
 	if err := lockTenantQuotaScope(ctx, tx, tenantID); err != nil {
 		return CreateJobResult{}, err
 	}
@@ -546,11 +604,15 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 			return CreateJobResult{}, fmt.Errorf("insert schedule: %w", err)
 		}
 
+		result := CreateJobResult{JobID: jobID}
+		if err := persistIdempotentCreateJob(tx, ctx, tenantID, input, result); err != nil {
+			return CreateJobResult{}, err
+		}
 		if err := tx.Commit(); err != nil {
 			return CreateJobResult{}, fmt.Errorf("commit schedule tx: %w", err)
 		}
 
-		return CreateJobResult{JobID: jobID}, nil
+		return result, nil
 	}
 
 	runID, err := newID("run")
@@ -586,14 +648,18 @@ func (s *Store) CreateJob(ctx context.Context, input CreateJobInput) (CreateJobR
 		return CreateJobResult{}, fmt.Errorf("insert run event: %w", err)
 	}
 
+	result := CreateJobResult{
+		JobID: jobID,
+		RunID: &runID,
+	}
+	if err := persistIdempotentCreateJob(tx, ctx, tenantID, input, result); err != nil {
+		return CreateJobResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return CreateJobResult{}, fmt.Errorf("commit tx: %w", err)
 	}
 
-	return CreateJobResult{
-		JobID: jobID,
-		RunID: &runID,
-	}, nil
+	return result, nil
 }
 
 func (s *Store) ListJobs(ctx context.Context, filter JobFilter) ([]Job, error) {

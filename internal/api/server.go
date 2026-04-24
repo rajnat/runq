@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -858,10 +860,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.createJob(ctx, req)
+	resp, err := s.createJob(ctx, req, strings.TrimSpace(r.Header.Get("Idempotency-Key")))
 	if err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "JOB_ALREADY_EXISTS", "an active job with this dedupe key already exists")
+			return
+		}
+		if errors.Is(err, store.ErrIdempotencyConflict) {
+			writeError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "idempotency key was already used with a different request")
 			return
 		}
 		if errors.Is(err, store.ErrQuotaExceeded) {
@@ -2207,8 +2213,17 @@ func (s *Server) handleFailRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
 
-func (s *Server) createJob(ctx context.Context, req CreateJobRequest) (CreateJobResponse, error) {
-	result, err := s.store.CreateJob(ctx, req.ToStoreInput())
+func (s *Server) createJob(ctx context.Context, req CreateJobRequest, idempotencyKey string) (CreateJobResponse, error) {
+	input := req.ToStoreInput()
+	if idempotencyKey != "" {
+		hash, err := createJobRequestHash(input)
+		if err != nil {
+			return CreateJobResponse{}, err
+		}
+		input.IdempotencyKey = idempotencyKey
+		input.IdempotencyRequestHash = hash
+	}
+	result, err := s.store.CreateJob(ctx, input)
 	if err != nil {
 		return CreateJobResponse{}, err
 	}
@@ -2218,6 +2233,15 @@ func (s *Server) createJob(ctx context.Context, req CreateJobRequest) (CreateJob
 		RunID:  result.RunID,
 		Status: "accepted",
 	}, nil
+}
+
+func createJobRequestHash(input store.CreateJobInput) (string, error) {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return "", fmt.Errorf("marshal create job request hash: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", sum[:]), nil
 }
 
 func (s *Server) authorizeWorkerIdentity(ctx context.Context, w http.ResponseWriter, principal principal, workerID string) bool {

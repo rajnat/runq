@@ -1620,9 +1620,9 @@ func TestCreateJobRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("expected 400 for unknown field, got %d", status)
 	}
 }
-
-func TestCreateJobRejectsDuplicateDedupeKey(t *testing.T) {
+func TestCreateJobReturnsConflictForDuplicateDedupeKey(t *testing.T) {
 	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
 
 	server := newTestServer(t, jobStore)
 	httpServer := httptest.NewServer(server.mux)
@@ -1645,6 +1645,82 @@ func TestCreateJobRejectsDuplicateDedupeKey(t *testing.T) {
 	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", payload, &map[string]any{})
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409 for duplicate dedupe key, got %d", status)
+	}
+}
+
+func TestCreateJobReplaysIdempotencyKey(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	payload := map[string]any{
+		"name":      "api-idempotent",
+		"tenant_id": "tenant-api",
+		"queue":     "default",
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/task"},
+	}
+	headers := map[string]string{"Idempotency-Key": "idem-create-1"}
+	var first CreateJobResponse
+	status := doJSONRequestWithHeaders(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", headers, payload, &first)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected first 202 create, got %d", status)
+	}
+	var second CreateJobResponse
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", headers, payload, &second)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected replayed 202 create, got %d", status)
+	}
+	if first.JobID != second.JobID {
+		t.Fatalf("expected same job id on replay, got %+v and %+v", first, second)
+	}
+	if (first.RunID == nil) != (second.RunID == nil) || (first.RunID != nil && *first.RunID != *second.RunID) {
+		t.Fatalf("expected same run id on replay, got %+v and %+v", first, second)
+	}
+	jobs, err := jobStore.ListJobs(context.Background(), store.JobFilter{TenantID: "tenant-api"})
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one persisted job, got %+v", jobs)
+	}
+}
+
+func TestCreateJobRejectsIdempotencyKeyReuseWithDifferentRequest(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	headers := map[string]string{"Idempotency-Key": "idem-create-2"}
+	payload := map[string]any{
+		"name":      "api-idempotent-a",
+		"tenant_id": "tenant-api",
+		"queue":     "default",
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/task"},
+	}
+	status := doJSONRequestWithHeaders(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", headers, payload, &CreateJobResponse{})
+	if status != http.StatusAccepted {
+		t.Fatalf("expected first 202 create, got %d", status)
+	}
+	payload["name"] = "api-idempotent-b"
+	var errResp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", headers, payload, &errResp)
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409 for idempotency conflict, got %d", status)
+	}
+	if errResp.Error.Code != "IDEMPOTENCY_KEY_REUSED" {
+		t.Fatalf("expected IDEMPOTENCY_KEY_REUSED, got %+v", errResp)
 	}
 }
 
@@ -3498,6 +3574,10 @@ func TestRegisterWorkerReusesIdentityByName(t *testing.T) {
 }
 
 func doJSONRequest(t *testing.T, client *http.Client, token, method, url string, requestBody any, responseBody any) int {
+	return doJSONRequestWithHeaders(t, client, token, method, url, nil, requestBody, responseBody)
+}
+
+func doJSONRequestWithHeaders(t *testing.T, client *http.Client, token, method, url string, headers map[string]string, requestBody any, responseBody any) int {
 	t.Helper()
 
 	var body io.Reader
@@ -3516,6 +3596,9 @@ func doJSONRequest(t *testing.T, client *http.Client, token, method, url string,
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 
 	resp, err := client.Do(req)
@@ -3590,7 +3673,21 @@ func resetTablesForAPI(t *testing.T, jobStore *store.Store) {
 	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(989898)`); err != nil {
 		t.Fatalf("acquire reset lock: %v", err)
 	}
-	if _, err := tx.Exec(`TRUNCATE TABLE audit_events, run_events, runs, job_schedules, workers, jobs, tenant_quotas RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS api_idempotency_keys (
+			tenant_id TEXT NOT NULL,
+			operation TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			response_status INTEGER NOT NULL,
+			response_body JSONB NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (tenant_id, operation, idempotency_key)
+		)
+	`); err != nil {
+		t.Fatalf("ensure idempotency table: %v", err)
+	}
+	if _, err := tx.Exec(`TRUNCATE TABLE api_idempotency_keys, audit_events, run_events, runs, job_schedules, workers, jobs, tenant_quotas RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("truncate tables: %v", err)
 	}
 	if err := tx.Commit(); err != nil {

@@ -392,6 +392,69 @@ func TestCreateJobRejectsDuplicateDedupeKey(t *testing.T) {
 	}
 }
 
+func TestCreateJobReplaysIdempotencyKey(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	input := CreateJobInput{
+		Name:                   "idempotent-job",
+		TenantID:               "tenant-dedupe",
+		Queue:                  "test",
+		Kind:                   "http",
+		Payload:                map[string]any{"url": "https://example.internal"},
+		ScheduleType:           "once",
+		IdempotencyKey:         "idem-store-1",
+		IdempotencyRequestHash: "hash-a",
+	}
+	first, err := store.CreateJob(ctx, input)
+	if err != nil {
+		t.Fatalf("create first idempotent job: %v", err)
+	}
+	second, err := store.CreateJob(ctx, input)
+	if err != nil {
+		t.Fatalf("replay idempotent job: %v", err)
+	}
+	if first.JobID != second.JobID {
+		t.Fatalf("expected same job id, got %+v and %+v", first, second)
+	}
+	if (first.RunID == nil) != (second.RunID == nil) || (first.RunID != nil && *first.RunID != *second.RunID) {
+		t.Fatalf("expected same run id, got %+v and %+v", first, second)
+	}
+	jobs, err := store.ListJobs(ctx, JobFilter{TenantID: "tenant-dedupe"})
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job after replay, got %+v", jobs)
+	}
+}
+
+func TestCreateJobRejectsIdempotencyKeyReuseWithDifferentRequest(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	input := CreateJobInput{
+		Name:                   "idempotent-job-a",
+		TenantID:               "tenant-dedupe",
+		Queue:                  "test",
+		Kind:                   "http",
+		Payload:                map[string]any{"url": "https://example.internal"},
+		ScheduleType:           "once",
+		IdempotencyKey:         "idem-store-2",
+		IdempotencyRequestHash: "hash-a",
+	}
+	if _, err := store.CreateJob(ctx, input); err != nil {
+		t.Fatalf("create first idempotent job: %v", err)
+	}
+	input.Name = "idempotent-job-b"
+	input.IdempotencyRequestHash = "hash-b"
+	if _, err := store.CreateJob(ctx, input); err != ErrIdempotencyConflict {
+		t.Fatalf("expected ErrIdempotencyConflict, got %v", err)
+	}
+}
+
 func TestCreateJobPersistsConcurrencyKey(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
@@ -1527,7 +1590,23 @@ func resetTables(t *testing.T, store *Store) {
 	}
 
 	_, err = tx.Exec(`
-		TRUNCATE TABLE audit_events, run_events, runs, job_schedules, workers, jobs, tenant_quotas RESTART IDENTITY CASCADE
+		CREATE TABLE IF NOT EXISTS api_idempotency_keys (
+			tenant_id TEXT NOT NULL,
+			operation TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			response_status INTEGER NOT NULL,
+			response_body JSONB NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (tenant_id, operation, idempotency_key)
+		)
+	`)
+	if err != nil {
+		t.Fatalf("ensure idempotency table: %v", err)
+	}
+
+	_, err = tx.Exec(`
+		TRUNCATE TABLE api_idempotency_keys, audit_events, run_events, runs, job_schedules, workers, jobs, tenant_quotas RESTART IDENTITY CASCADE
 	`)
 	if err != nil {
 		t.Fatalf("truncate tables: %v", err)
