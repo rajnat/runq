@@ -77,7 +77,7 @@ func LoadAPI() APIConfig {
 		DBConnString:            envOrDefault("RUNQ_DATABASE_URL", defaultDBConnString),
 		AuthTokens:              envOrDefault("RUNQ_API_TOKENS", ""),
 		InsecureDevMode:         boolEnvOrDefault("RUNQ_INSECURE_DEV_MODE", false),
-		MetricsAddress:          envOrDefault("RUNQ_API_METRICS_ADDR", ":9090"),
+		MetricsAddress:          envOrDefault("RUNQ_API_METRICS_ADDR", "127.0.0.1:9090"),
 		TraceEndpoint:           envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
 		WorkerHeartbeatInterval: durationEnvOrDefault("RUNQ_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5*time.Second),
 		WorkerLeaseDuration:     durationEnvOrDefault("RUNQ_LEASE_DURATION_SECONDS", 30*time.Second),
@@ -115,7 +115,7 @@ func LoadWorker() WorkerConfig {
 		PollInterval:      durationEnvOrDefault("RUNQ_WORKER_POLL_INTERVAL_SECONDS", 2*time.Second),
 		HeartbeatInterval: durationEnvOrDefault("RUNQ_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5*time.Second),
 		ExecutionTime:     durationEnvOrDefault("RUNQ_WORKER_EXECUTION_SECONDS", 3*time.Second),
-		MetricsAddress:    envOrDefault("RUNQ_WORKER_METRICS_ADDR", ":9093"),
+		MetricsAddress:    envOrDefault("RUNQ_WORKER_METRICS_ADDR", "127.0.0.1:9093"),
 		TraceEndpoint:     envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
 	}
 }
@@ -211,11 +211,11 @@ func componentMetricsEnvKey(name string) string {
 func defaultComponentMetricsAddr(name string) string {
 	switch name {
 	case "scheduler":
-		return ":9091"
+		return "127.0.0.1:9091"
 	case "reaper":
-		return ":9092"
+		return "127.0.0.1:9092"
 	case "worker":
-		return ":9093"
+		return "127.0.0.1:9093"
 	default:
 		return ""
 	}

@@ -14,6 +14,9 @@ import (
 
 func main() {
 	cfg := config.LoadWorker()
+	if err := cfg.Validate(); err != nil {
+		log.Fatal(err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger := log.New(os.Stdout, "worker ", log.LstdFlags|log.LUTC)
