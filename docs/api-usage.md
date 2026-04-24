@@ -264,6 +264,11 @@ Supported filters:
 
 List endpoints support offset and cursor pagination.
 
+Rules:
+- use either `offset` or `cursor` for a request, never both
+- if a `cursor` is present, omit `offset`
+- for stable deep pagination, prefer cursor mode
+
 Response pagination shape:
 - `limit`
 - `offset`
@@ -271,8 +276,6 @@ Response pagination shape:
 - `has_more`
 - `next_offset`
 - `next_cursor`
-
-For stable deep pagination, prefer cursor mode.
 
 ## Stable error contract
 

@@ -280,6 +280,10 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+	if err := validatePaginationMode(offset, cursor); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
 	createdAfter, err := parseOptionalTime(r.URL.Query().Get("created_after"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "created_after must be RFC3339")
@@ -1122,6 +1126,10 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+	if err := validatePaginationMode(offset, cursor); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
 
 	events, hasMore, nextBoundary, err := s.store.ListAuditEventsPage(ctx, store.AuditEventFilter{
 		TenantID:     strings.TrimSpace(r.URL.Query().Get("tenant_id")),
@@ -1257,6 +1265,10 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	cursor, err := decodePageCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if err := validatePaginationMode(offset, cursor); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
@@ -1801,6 +1813,10 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	}
 	cursor, err := decodePageCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if err := validatePaginationMode(offset, cursor); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}

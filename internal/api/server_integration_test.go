@@ -1263,6 +1263,92 @@ func TestListEndpointsCapRequestedPageSize(t *testing.T) {
 	}
 }
 
+func TestListEndpointsRejectOffsetAndCursorTogether(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	for i := 0; i < 2; i++ {
+		var createResp CreateJobResponse
+		status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+			"name":      fmt.Sprintf("api-cursor-mix-job-%d", i),
+			"tenant_id": "tenant-api",
+			"queue":     "default",
+			"kind":      "http",
+			"payload":   map[string]any{"index": i},
+		}, &createResp)
+		if status != http.StatusAccepted {
+			t.Fatalf("expected 202 creating job %d, got %d", i, status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	firstJobs := ListJobsResponse{}
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&limit=1", nil, &firstJobs)
+	if status != http.StatusOK || firstJobs.Pagination.NextCursor == nil {
+		t.Fatalf("expected first jobs page with cursor, got status=%d resp=%+v", status, firstJobs)
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/jobs?tenant_id=tenant-api&limit=1&offset=1&cursor="+*firstJobs.Pagination.NextCursor, nil, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 mixing jobs offset and cursor, got %d", status)
+	}
+
+	firstRuns := ListRunsResponse{}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs?tenant_id=tenant-api&limit=1", nil, &firstRuns)
+	if status != http.StatusOK || firstRuns.Pagination.NextCursor == nil {
+		t.Fatalf("expected first runs page with cursor, got status=%d resp=%+v", status, firstRuns)
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs?tenant_id=tenant-api&limit=1&offset=1&cursor="+*firstRuns.Pagination.NextCursor, nil, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 mixing runs offset and cursor, got %d", status)
+	}
+
+	for i := 0; i < 2; i++ {
+		var workerResp RegisterWorkerResponse
+		status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+			"name":            fmt.Sprintf("worker-cursor-mix-%d", i),
+			"queues":          []string{"default"},
+			"capabilities":    map[string]any{"http": true},
+			"max_concurrency": 1,
+		}, &workerResp)
+		if status != http.StatusCreated {
+			t.Fatalf("expected 201 registering worker %d, got %d", i, status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	firstWorkers := ListWorkersResponse{}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?limit=1", nil, &firstWorkers)
+	if status != http.StatusOK || firstWorkers.Pagination.NextCursor == nil {
+		t.Fatalf("expected first workers page with cursor, got status=%d resp=%+v", status, firstWorkers)
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/workers?limit=1&offset=1&cursor="+*firstWorkers.Pagination.NextCursor, nil, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 mixing workers offset and cursor, got %d", status)
+	}
+
+	for i := 0; i < 2; i++ {
+		status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodPut, httpServer.URL+fmt.Sprintf("/v1/tenants/tenant-cursor-mix-%d/quota", i), map[string]any{
+			"max_inflight": i + 1,
+		}, &TenantQuotaResponse{})
+		if status != http.StatusOK {
+			t.Fatalf("expected 200 upserting quota %d, got %d", i, status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	firstAudit := ListAuditEventsResponse{}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/audit/events?limit=1", nil, &firstAudit)
+	if status != http.StatusOK || firstAudit.Pagination.NextCursor == nil {
+		t.Fatalf("expected first audit page with cursor, got status=%d resp=%+v", status, firstAudit)
+	}
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/audit/events?limit=1&offset=1&cursor="+*firstAudit.Pagination.NextCursor, nil, &map[string]any{})
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 mixing audit offset and cursor, got %d", status)
+	}
+}
+
 func TestListAuditEventsSupportsResourceAndActorFilters(t *testing.T) {
 	jobStore := openTestStore(t)
 	ctx := context.Background()

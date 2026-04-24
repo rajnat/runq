@@ -438,6 +438,13 @@ func (r HeartbeatRequest) Validate() error {
 	return nil
 }
 
+func validatePaginationMode(offset int, cursor *store.PageBoundary) error {
+	if offset > 0 && cursor != nil {
+		return errors.New("offset and cursor cannot be combined")
+	}
+	return nil
+}
+
 func (r CompleteRunRequest) Validate() error {
 	if strings.TrimSpace(r.RunID) == "" {
 		return errors.New("run_id is required")
