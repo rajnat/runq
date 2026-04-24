@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -143,26 +144,34 @@ func (s *Server) instrument(route string, handler http.HandlerFunc) http.Handler
 
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		handler(recorder, r.WithContext(ctx))
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				s.metrics.IncCounter("runq_api_panics_total")
+				s.logger.Printf("recovered panic route=%s path=%s err=%v\n%s", route, r.URL.Path, recovered, debug.Stack())
+				writeError(recorder, http.StatusInternalServerError, "INTERNAL", "internal server error")
+			}
 
-		s.metrics.IncCounterVec("runq_api_requests_total", map[string]string{
-			"method": method,
-			"route":  route,
-			"status": statusClass(recorder.status),
-		})
-		s.metrics.ObserveHistogramVec("runq_api_request_duration_seconds", map[string]string{
-			"method": method,
-			"route":  route,
-		}, time.Since(started).Seconds())
-		span.SetAttributes(
-			attribute.String("http.request.method", method),
-			attribute.String("http.route", route),
-			attribute.String("url.path", r.URL.Path),
-			attribute.Int("http.response.status_code", recorder.status),
-		)
-		if recorder.status >= 500 {
-			span.SetStatus(codes.Error, http.StatusText(recorder.status))
-		}
+			s.metrics.IncCounterVec("runq_api_requests_total", map[string]string{
+				"method": method,
+				"route":  route,
+				"status": statusClass(recorder.status),
+			})
+			s.metrics.ObserveHistogramVec("runq_api_request_duration_seconds", map[string]string{
+				"method": method,
+				"route":  route,
+			}, time.Since(started).Seconds())
+			span.SetAttributes(
+				attribute.String("http.request.method", method),
+				attribute.String("http.route", route),
+				attribute.String("url.path", r.URL.Path),
+				attribute.Int("http.response.status_code", recorder.status),
+			)
+			if recorder.status >= 500 {
+				span.SetStatus(codes.Error, http.StatusText(recorder.status))
+			}
+		}()
+
+		handler(recorder, r.WithContext(ctx))
 	})
 }
 

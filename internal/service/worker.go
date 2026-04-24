@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -210,11 +211,28 @@ func (w *WorkerProcess) executeAssignment(ctx context.Context, assignment worker
 	defer w.clearRunning(assignment.RunID)
 	ctx, span := observability.Tracer("runq/worker").Start(ctx, "worker.execute_assignment")
 	defer span.End()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err := fmt.Errorf("worker assignment panic: %v", recovered)
+			w.metrics.IncCounter("runq_worker_panics_total")
+			w.logger.Printf("panic in run=%s job=%s err=%v\n%s", assignment.RunID, assignment.JobID, recovered, debug.Stack())
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			if failErr := w.reportAssignmentPanic(ctx, assignment, err); failErr != nil {
+				w.metrics.IncCounter("runq_worker_run_fail_errors_total")
+				w.logger.Printf("panic fail report run=%s error=%v", assignment.RunID, failErr)
+			}
+		}
+	}()
 	span.SetAttributes(
 		attribute.String("runq.run_id", assignment.RunID),
 		attribute.String("runq.job_id", assignment.JobID),
 		attribute.String("runq.kind", assignment.Kind),
 	)
+
+	if value, ok := assignment.Payload["simulate_panic"].(bool); ok && value {
+		panic("simulated worker panic")
+	}
 
 	steps := int(w.cfg.ExecutionTime / time.Second)
 	if steps < 1 {
@@ -309,6 +327,17 @@ func (w *WorkerProcess) executeAssignment(ctx context.Context, assignment worker
 	}
 	w.metrics.IncCounter("runq_worker_runs_completed_total")
 	w.logger.Printf("completed run=%s", assignment.RunID)
+}
+
+func (w *WorkerProcess) reportAssignmentPanic(ctx context.Context, assignment workerAssignment, err error) error {
+	path := fmt.Sprintf("/v1/workers/%s/fail", w.getWorkerID())
+	return w.doJSON(ctx, http.MethodPost, path, failRunRequest{
+		RunID:        assignment.RunID,
+		LeaseToken:   assignment.LeaseToken,
+		ErrorCode:    "PANIC",
+		ErrorMessage: err.Error(),
+		Retryable:    true,
+	}, nil)
 }
 
 func (w *WorkerProcess) sendHeartbeat(ctx context.Context) error {

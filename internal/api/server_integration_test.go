@@ -1791,6 +1791,30 @@ func TestExplicitInsecureDevModeAllowsAuthBypass(t *testing.T) {
 	}
 }
 
+func TestRecoveredPanicReturnsStructuredInternalError(t *testing.T) {
+	server, err := NewServer(config.APIConfig{AuthTokens: adminToken + ":admin"}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	server.handle("GET /panic", func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})
+
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var errResp map[string]any
+	status := doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/panic", nil, &errResp)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from recovered panic, got %d", status)
+	}
+
+	status = doJSONRequest(t, httpServer.Client(), adminToken, http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("expected server to keep serving after recovered panic, got %d", status)
+	}
+}
+
 func TestWorkerTokenCannotRegisterDifferentWorkerName(t *testing.T) {
 	jobStore := openTestStore(t)
 

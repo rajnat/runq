@@ -127,6 +127,49 @@ func TestWorkerProcessCompletesClaimedRun(t *testing.T) {
 	}
 }
 
+func TestWorkerProcessRecoversPanicsAndFailsRun(t *testing.T) {
+	var failed failRunRequest
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/workers/worker-test/fail":
+			if err := json.NewDecoder(r.Body).Decode(&failed); err != nil {
+				t.Fatalf("decode fail request: %v", err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer httpServer.Close()
+
+	worker := NewWorkerProcess(log.New(io.Discard, "", 0), config.WorkerConfig{
+		APIBaseURL:     httpServer.URL,
+		AuthToken:      "worker-token",
+		Name:           "worker-test",
+		Queues:         []string{"default"},
+		Capabilities:   []string{"http"},
+		MaxConcurrency: 1,
+		ExecutionTime:  10 * time.Millisecond,
+	}, observability.NewRegistry())
+	worker.workerID = "worker-test"
+	worker.assignWG.Add(1)
+
+	worker.executeAssignment(context.Background(), workerAssignment{
+		RunID:      "run-panic",
+		JobID:      "job-panic",
+		LeaseToken: 42,
+		Kind:       "http",
+		Payload:    map[string]any{"simulate_panic": true},
+	})
+
+	if failed.RunID != "run-panic" {
+		t.Fatalf("expected panic recovery to fail run, got %+v", failed)
+	}
+	if failed.ErrorCode != "PANIC" {
+		t.Fatalf("expected panic error code, got %+v", failed)
+	}
+}
+
 func TestWorkerProcessAbandonsCanceledRun(t *testing.T) {
 	jobStore := openTestStore(t)
 	release := lockAndResetTables(t, jobStore)
