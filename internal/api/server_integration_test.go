@@ -2155,6 +2155,25 @@ func TestWorkerProtocolRequiresValidSessionToken(t *testing.T) {
 	}
 }
 
+func TestAdminWorkerProtocolReturnsNotFoundForUnknownWorker(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequestWithHeaders(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/worker-missing/poll", map[string]string{workerSessionHeader: "unused"}, map[string]any{"available_slots": 1}, &map[string]any{})
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404 polling unknown worker, got %d", status)
+	}
+
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), adminToken, http.MethodPost, httpServer.URL+"/v1/workers/worker-missing/heartbeat", map[string]string{workerSessionHeader: "unused"}, map[string]any{"running": []map[string]any{}}, &map[string]any{})
+	if status != http.StatusNotFound {
+		t.Fatalf("expected 404 heartbeating unknown worker, got %d", status)
+	}
+}
+
 func TestOldWorkerSessionIsInvalidAfterReregistration(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)
