@@ -27,10 +27,10 @@ make migrate
 Start processes in separate terminals:
 
 ```bash
-RUNQ_API_TOKENS='admin-token:admin,tenant-token:tenant:tenant-api,worker-token:worker:worker-api' make run-api
+RUNQ_API_TOKENS='admin-...-api' make run-api
 make run-scheduler
 make run-reaper
-RUNQ_WORKER_AUTH_TOKEN=worker-token RUNQ_WORKER_NAME=worker-api make run-worker
+RUNQ_WORKER_AUTH_TOKEN=*** RUNQ_WORKER_NAME=worker-api make run-worker
 ```
 
 ## Environment variables
@@ -80,6 +80,28 @@ Important variables:
 - back up Postgres before schema changes
 - keep migration history from `schema_migrations`
 - rollback is primarily data restore + binary rollback; no down-migration framework exists today
+
+## Event retention and partitioning plan
+
+For production-scale histories, treat `run_events` and `audit_events` as partitioned operational logs.
+
+Recommended plan:
+- partition both tables monthly on `event_time`
+- precreate upcoming partitions during routine maintenance
+- expire old partitions by dropping whole partitions instead of bulk deleting rows
+- keep indexes aligned with the dominant read paths (`run_id,event_time` for `run_events`; tenant/action/resource filters plus `event_time` for `audit_events`)
+
+Suggested retention windows:
+- `run_events`: 30-90 days hot in Postgres
+- `audit_events`: at least 365 days hot in Postgres
+
+If longer history is required, archive partitions to external storage or a reporting warehouse before dropping them.
+
+Operational safeguards:
+- schedule partition creation/drop during off-peak windows
+- validate partition-aware backup/restore flows before rollout
+- verify CI/test reset helpers still work with partitioned parent tables
+- prefer additive partition migrations plus data copy/swap over risky in-place rewrites during busy hours
 
 ## Incident checklist
 

@@ -79,6 +79,15 @@ Core entities:
 - worker tokens are tied to worker identity
 - list/get/mutation endpoints enforce tenant access checks in the API layer
 
+Preferred hardening direction:
+- keep API-layer authorization checks for explicit client-facing denial behavior
+- propagate explicit tenant ownership to operational tables beyond `jobs`
+- add request-scoped DB execution for tenant requests
+- enforce DB-level tenant isolation with Postgres RLS as defense in depth
+- keep admin/scheduler/reaper paths on privileged DB access outside tenant RLS policies
+
+The target state is layered isolation rather than replacing the API checks with RLS alone.
+
 ## Observability
 
 - Prometheus metrics from every runtime
@@ -92,3 +101,4 @@ Current implementation is intentionally pragmatic:
 - tenancy is enforced in application logic rather than DB-level isolation
 - job lookup natural keys currently focus on tenant + dedupe key
 - docs/OpenAPI are maintained in-repo rather than generated from annotations
+- event history tables are not yet partitioned, so long-retention operation should assume future partitioning work for `run_events` and `audit_events`
