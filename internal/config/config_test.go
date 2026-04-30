@@ -11,10 +11,17 @@ func TestAPIConfigValidateRejectsEmptyAuthTokensByDefault(t *testing.T) {
 	}
 }
 
-func TestAPIConfigValidateAllowsExplicitInsecureDevMode(t *testing.T) {
-	cfg := APIConfig{InsecureDevMode: true}
+func TestAPIConfigValidateRejectsInsecureDevModeOnNonLoopbackBind(t *testing.T) {
+	cfg := APIConfig{InsecureDevMode: true, Address: ":8080"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected insecure dev mode on non-loopback bind to be rejected")
+	}
+}
+
+func TestAPIConfigValidateAllowsExplicitInsecureDevModeOnLoopbackBind(t *testing.T) {
+	cfg := APIConfig{InsecureDevMode: true, Address: "127.0.0.1:8080"}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected insecure dev mode to allow empty auth tokens: %v", err)
+		t.Fatalf("expected loopback insecure dev mode to validate: %v", err)
 	}
 }
 

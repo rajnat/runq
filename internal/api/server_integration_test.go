@@ -1999,7 +1999,7 @@ func TestEmptyAuthConfigDoesNotGrantImplicitAdminAccess(t *testing.T) {
 }
 
 func TestExplicitInsecureDevModeAllowsAuthBypass(t *testing.T) {
-	server, err := NewServer(config.APIConfig{InsecureDevMode: true}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
+	server, err := NewServer(config.APIConfig{InsecureDevMode: true, Address: "127.0.0.1:8080"}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}

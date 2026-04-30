@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -65,7 +66,26 @@ func (c APIConfig) Validate() error {
 	if strings.TrimSpace(c.AuthTokens) == "" && !c.InsecureDevMode {
 		return fmt.Errorf("RUNQ_API_TOKENS is required unless RUNQ_INSECURE_DEV_MODE=true")
 	}
+	if c.InsecureDevMode && !isLoopbackBindAddress(strings.TrimSpace(c.Address)) {
+		return fmt.Errorf("RUNQ_INSECURE_DEV_MODE requires RUNQ_API_ADDR to bind to localhost/loopback only")
+	}
 	return nil
+}
+
+func isLoopbackBindAddress(address string) bool {
+	if address == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (c WorkerConfig) Validate() error {
