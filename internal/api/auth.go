@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -85,9 +86,15 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (pr
 	if len(s.authTokens) == 0 && s.cfg.InsecureDevMode {
 		return principal{Role: roleAdmin}, true
 	}
+	if !s.allowSourceRequest(r) {
+		s.metrics.IncCounterVec("runq_api_auth_failures_total", map[string]string{"reason": "preauth_rate_limited"})
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "rate limit exceeded")
+		return principal{}, false
+	}
 
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	if !strings.HasPrefix(header, "Bearer ") {
+		s.metrics.IncCounterVec("runq_api_auth_failures_total", map[string]string{"reason": "missing_bearer_token"})
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing bearer token")
 		return principal{}, false
 	}
@@ -95,6 +102,7 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (pr
 	token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
 	authPrincipal, ok := s.authTokens[token]
 	if !ok {
+		s.metrics.IncCounterVec("runq_api_auth_failures_total", map[string]string{"reason": "invalid_bearer_token"})
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		return principal{}, false
 	}
@@ -104,6 +112,25 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) (pr
 	}
 
 	return authPrincipal, true
+}
+
+func (s *Server) allowSourceRequest(r *http.Request) bool {
+	if s.preAuthLimiter == nil {
+		return true
+	}
+	return s.preAuthLimiter.Allow(sourceRateLimitKey(r), time.Now())
+}
+
+func sourceRateLimitKey(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
 }
 
 func (s *Server) allowAuthenticatedRequest(token string, principal principal) bool {

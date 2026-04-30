@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -2014,6 +2015,73 @@ func TestExplicitInsecureDevModeAllowsAuthBypass(t *testing.T) {
 	}
 	if resp.Role != "admin" {
 		t.Fatalf("expected admin role in insecure dev mode, got %+v", resp)
+	}
+}
+
+func TestRequestsAreRateLimitedBeforeAuthentication(t *testing.T) {
+	server, err := NewServer(config.APIConfig{
+		Address:                   "127.0.0.1:8080",
+		AuthTokens:                adminToken + ":admin",
+		TokenRateLimitPerSecond:   100,
+		TokenRateLimitBurst:       100,
+		TenantRateLimitPerSecond:  100,
+		TenantRateLimitBurst:      100,
+		PreAuthRateLimitPerSecond: 1,
+		PreAuthRateLimitBurst:     1,
+	}, log.New(io.Discard, "", 0), nil, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), "", http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected first unauthenticated request to be unauthorized, got %d", status)
+	}
+	status = doJSONRequest(t, httpServer.Client(), "", http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &map[string]any{})
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("expected second unauthenticated request to be rate limited, got %d", status)
+	}
+}
+
+func TestAuthenticationFailuresIncrementMetrics(t *testing.T) {
+	registry := observability.NewRegistry()
+	server, err := NewServer(config.APIConfig{
+		Address:                   "127.0.0.1:8080",
+		AuthTokens:                adminToken + ":admin",
+		TokenRateLimitPerSecond:   100,
+		TokenRateLimitBurst:       100,
+		TenantRateLimitPerSecond:  100,
+		TenantRateLimitBurst:      100,
+		PreAuthRateLimitPerSecond: 100,
+		PreAuthRateLimitBurst:     100,
+	}, log.New(io.Discard, "", 0), nil, registry)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	status := doJSONRequest(t, httpServer.Client(), "", http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected missing token request to be unauthorized, got %d", status)
+	}
+	status = doJSONRequest(t, httpServer.Client(), "not-a-real-token", http.MethodGet, httpServer.URL+"/v1/auth/me", nil, &map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected invalid token request to be unauthorized, got %d", status)
+	}
+
+	metrics := registry.Render()
+	for _, want := range []string{
+		`runq_api_auth_failures_total{reason="missing_bearer_token"} 1`,
+		`runq_api_auth_failures_total{reason="invalid_bearer_token"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("expected metrics to contain %q, got:\n%s", want, metrics)
+		}
 	}
 }
 

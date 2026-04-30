@@ -22,14 +22,15 @@ import (
 )
 
 type Server struct {
-	cfg           config.APIConfig
-	logger        *log.Logger
-	mux           *http.ServeMux
-	store         *store.Store
-	metrics       *observability.Registry
-	authTokens    map[string]principal
-	tokenLimiter  *rateLimiter
-	tenantLimiter *rateLimiter
+	cfg            config.APIConfig
+	logger         *log.Logger
+	mux            *http.ServeMux
+	store          *store.Store
+	metrics        *observability.Registry
+	authTokens     map[string]principal
+	preAuthLimiter *rateLimiter
+	tokenLimiter   *rateLimiter
+	tenantLimiter  *rateLimiter
 }
 
 func NewServer(cfg config.APIConfig, logger *log.Logger, jobStore *store.Store, metrics *observability.Registry) (*Server, error) {
@@ -42,14 +43,15 @@ func NewServer(cfg config.APIConfig, logger *log.Logger, jobStore *store.Store, 
 	}
 
 	server := &Server{
-		cfg:           cfg,
-		logger:        logger,
-		mux:           http.NewServeMux(),
-		store:         jobStore,
-		metrics:       metrics,
-		authTokens:    authTokens,
-		tokenLimiter:  newRateLimiter(cfg.TokenRateLimitPerSecond, cfg.TokenRateLimitBurst),
-		tenantLimiter: newRateLimiter(cfg.TenantRateLimitPerSecond, cfg.TenantRateLimitBurst),
+		cfg:            cfg,
+		logger:         logger,
+		mux:            http.NewServeMux(),
+		store:          jobStore,
+		metrics:        metrics,
+		authTokens:     authTokens,
+		preAuthLimiter: newRateLimiter(cfg.PreAuthRateLimitPerSecond, cfg.PreAuthRateLimitBurst),
+		tokenLimiter:   newRateLimiter(cfg.TokenRateLimitPerSecond, cfg.TokenRateLimitBurst),
+		tenantLimiter:  newRateLimiter(cfg.TenantRateLimitPerSecond, cfg.TenantRateLimitBurst),
 	}
 
 	server.routes()
