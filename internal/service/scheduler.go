@@ -48,7 +48,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 func (s *Scheduler) tick(ctx context.Context) error {
 	started := time.Now()
-	defer s.metrics.ObserveHistogram("runq_scheduler_tick_duration_seconds", time.Since(started).Seconds())
+	defer func() {
+		s.metrics.ObserveHistogram("runq_scheduler_tick_duration_seconds", time.Since(started).Seconds())
+	}()
 	ctx, span := observability.Tracer("runq/scheduler").Start(ctx, "scheduler.tick")
 	defer span.End()
 

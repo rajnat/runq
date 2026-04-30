@@ -177,7 +177,9 @@ func (w *WorkerProcess) register(ctx context.Context) (string, string, error) {
 
 func (w *WorkerProcess) pollAndDispatch(ctx context.Context, runCtx context.Context) error {
 	started := time.Now()
-	defer w.metrics.ObserveHistogram("runq_worker_poll_duration_seconds", time.Since(started).Seconds())
+	defer func() {
+		w.metrics.ObserveHistogram("runq_worker_poll_duration_seconds", time.Since(started).Seconds())
+	}()
 
 	workerID := w.getWorkerID()
 	if workerID == "" {
@@ -345,7 +347,9 @@ func (w *WorkerProcess) reportAssignmentPanic(ctx context.Context, assignment wo
 
 func (w *WorkerProcess) sendHeartbeat(ctx context.Context) error {
 	started := time.Now()
-	defer w.metrics.ObserveHistogram("runq_worker_heartbeat_duration_seconds", time.Since(started).Seconds())
+	defer func() {
+		w.metrics.ObserveHistogram("runq_worker_heartbeat_duration_seconds", time.Since(started).Seconds())
+	}()
 
 	workerID := w.getWorkerID()
 	if workerID == "" {

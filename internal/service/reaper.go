@@ -48,7 +48,9 @@ func (r *Reaper) Run(ctx context.Context) error {
 
 func (r *Reaper) tick(ctx context.Context) error {
 	started := time.Now()
-	defer r.metrics.ObserveHistogram("runq_reaper_tick_duration_seconds", time.Since(started).Seconds())
+	defer func() {
+		r.metrics.ObserveHistogram("runq_reaper_tick_duration_seconds", time.Since(started).Seconds())
+	}()
 	ctx, span := observability.Tracer("runq/reaper").Start(ctx, "reaper.tick")
 	defer span.End()
 
