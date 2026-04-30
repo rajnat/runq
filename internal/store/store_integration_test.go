@@ -639,6 +639,45 @@ func TestPauseAndResumeJobControlsClaiming(t *testing.T) {
 	}
 }
 
+func TestDisableJobPreventsClaimingPendingRuns(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	result, err := store.CreateJob(ctx, CreateJobInput{
+		Name:         "disable-job",
+		TenantID:     "tenant-disable",
+		Queue:        "test",
+		Kind:         "http",
+		Payload:      map[string]any{"url": "https://example.internal"},
+		ScheduleType: "once",
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "disable-worker",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"test": true},
+	}); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+
+	if _, err := store.DisableJob(ctx, result.JobID, nil); err != nil {
+		t.Fatalf("disable job: %v", err)
+	}
+
+	assignments, _, err := store.ClaimPendingRuns(ctx, 10, 30*time.Second, 0)
+	if err != nil {
+		t.Fatalf("claim while disabled: %v", err)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("expected no assignments while disabled, got %+v", assignments)
+	}
+}
+
 func TestTriggerJobCreatesAdHocRunForCronJob(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

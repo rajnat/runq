@@ -2083,6 +2083,7 @@ func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDurati
 		WHERE r.status = 'PENDING'
 		  AND r.available_at <= NOW()
 		  AND j.paused_at IS NULL
+		  AND j.disabled_at IS NULL
 		ORDER BY j.priority ASC, r.scheduled_at ASC
 		FOR UPDATE OF r SKIP LOCKED
 		LIMIT $1
