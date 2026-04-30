@@ -26,6 +26,7 @@ type APIConfig struct {
 	TraceEndpoint             string
 	WorkerHeartbeatInterval   time.Duration
 	WorkerLeaseDuration       time.Duration
+	WorkerSessionTTL          time.Duration
 	PreAuthRateLimitPerSecond int
 	PreAuthRateLimitBurst     int
 	TokenRateLimitPerSecond   int
@@ -107,6 +108,7 @@ func LoadAPI() APIConfig {
 		TraceEndpoint:             envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
 		WorkerHeartbeatInterval:   durationEnvOrDefault("RUNQ_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5*time.Second),
 		WorkerLeaseDuration:       durationEnvOrDefault("RUNQ_LEASE_DURATION_SECONDS", 30*time.Second),
+		WorkerSessionTTL:          durationEnvOrDefault("RUNQ_WORKER_SESSION_TTL_SECONDS", 24*time.Hour),
 		PreAuthRateLimitPerSecond: intEnvOrDefault("RUNQ_API_PREAUTH_RATE_LIMIT_RPS", 20),
 		PreAuthRateLimitBurst:     intEnvOrDefault("RUNQ_API_PREAUTH_RATE_LIMIT_BURST", 40),
 		TokenRateLimitPerSecond:   intEnvOrDefault("RUNQ_API_TOKEN_RATE_LIMIT_RPS", 50),

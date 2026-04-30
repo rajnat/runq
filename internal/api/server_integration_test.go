@@ -2366,6 +2366,57 @@ func TestOldWorkerSessionIsInvalidAfterReregistration(t *testing.T) {
 	}
 }
 
+func TestExpiredWorkerSessionIsRejected(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	cfg := testAPIConfig()
+	cfg.WorkerSessionTTL = time.Hour
+	server, err := NewServer(cfg, log.New(io.Discard, "", 0), jobStore, observability.NewRegistry())
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var workerResp RegisterWorkerResponse
+	status := doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &workerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 registering worker, got %d", status)
+	}
+
+	if _, err := jobStore.DB().ExecContext(context.Background(), `
+		UPDATE workers
+		SET session_issued_at = NOW() - INTERVAL '2 hours'
+		WHERE id = $1
+	`, workerResp.WorkerID); err != nil {
+		t.Fatalf("backdate worker session: %v", err)
+	}
+
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/poll", map[string]string{workerSessionHeader: workerResp.WorkerSessionToken}, map[string]any{"available_slots": 1}, &map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with expired session token, got %d", status)
+	}
+	status = doJSONRequest(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/register", map[string]any{
+		"name":            "worker-api",
+		"queues":          []string{"default"},
+		"capabilities":    map[string]any{"http": true},
+		"max_concurrency": 1,
+	}, &workerResp)
+	if status != http.StatusCreated {
+		t.Fatalf("expected 201 re-registering worker after expiration, got %d", status)
+	}
+	status = doJSONRequestWithHeaders(t, httpServer.Client(), workerToken, http.MethodPost, httpServer.URL+"/v1/workers/"+workerResp.WorkerID+"/poll", map[string]string{workerSessionHeader: workerResp.WorkerSessionToken}, map[string]any{"available_slots": 1}, &map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 using refreshed session token, got %d", status)
+	}
+}
+
 func TestWorkerTokenCannotRegisterDifferentWorkerName(t *testing.T) {
 	jobStore := openTestStore(t)
 
@@ -3904,6 +3955,7 @@ func testAPIConfig() config.APIConfig {
 		AuthTokens:              adminToken + ":admin," + tenantToken + ":tenant:tenant-api," + workerToken + ":worker:worker-api",
 		WorkerHeartbeatInterval: 5 * time.Second,
 		WorkerLeaseDuration:     30 * time.Second,
+		WorkerSessionTTL:        24 * time.Hour,
 	}
 }
 

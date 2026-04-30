@@ -678,6 +678,38 @@ func TestDisableJobPreventsClaimingPendingRuns(t *testing.T) {
 	}
 }
 
+func TestValidateWorkerSessionRejectsExpiredSession(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	worker, err := store.RegisterWorker(ctx, RegisterWorkerInput{
+		Name:           "expired-session-worker",
+		Queues:         []string{"test"},
+		Capabilities:   map[string]any{"http": true},
+		MaxConcurrency: 1,
+		Metadata:       map[string]any{"test": true},
+	})
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `
+		UPDATE workers
+		SET session_issued_at = NOW() - INTERVAL '2 hours'
+		WHERE id = $1
+	`, worker.WorkerID); err != nil {
+		t.Fatalf("backdate worker session: %v", err)
+	}
+
+	if _, err := store.ValidateWorkerSession(ctx, worker.WorkerID, worker.WorkerSessionToken, time.Hour); err != ErrConflict {
+		t.Fatalf("expected ErrConflict for expired session, got %v", err)
+	}
+	if _, err := store.ValidateWorkerSession(ctx, worker.WorkerID, worker.WorkerSessionToken, 3*time.Hour); err != nil {
+		t.Fatalf("expected session to validate with longer ttl: %v", err)
+	}
+}
+
 func TestTriggerJobCreatesAdHocRunForCronJob(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

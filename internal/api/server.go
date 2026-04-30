@@ -2285,7 +2285,7 @@ func (s *Server) authorizeWorkerIdentity(ctx context.Context, w http.ResponseWri
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing worker session token")
 		return false
 	}
-	if _, err := s.store.ValidateWorkerSession(lookupCtx, workerID, sessionToken); err != nil {
+	if _, err := s.store.ValidateWorkerSession(lookupCtx, workerID, sessionToken, s.cfg.WorkerSessionTTL); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid worker session token")
 			return false

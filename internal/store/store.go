@@ -184,13 +184,21 @@ func (s *Store) GetWorkerAuthState(ctx context.Context, workerID string) (Worker
 	return auth, nil
 }
 
-func (s *Store) ValidateWorkerSession(ctx context.Context, workerID, sessionToken string) (WorkerAuthState, error) {
+func (s *Store) ValidateWorkerSession(ctx context.Context, workerID, sessionToken string, ttl time.Duration) (WorkerAuthState, error) {
 	auth, err := s.GetWorkerAuthState(ctx, workerID)
 	if err != nil {
 		return WorkerAuthState{}, err
 	}
 	if subtle.ConstantTimeCompare([]byte(auth.SessionTokenHash), []byte(hashWorkerSessionToken(sessionToken))) != 1 {
 		return WorkerAuthState{}, ErrConflict
+	}
+	if ttl > 0 {
+		if auth.SessionIssuedAt == nil {
+			return WorkerAuthState{}, ErrConflict
+		}
+		if time.Since(auth.SessionIssuedAt.UTC()) > ttl {
+			return WorkerAuthState{}, ErrConflict
+		}
 	}
 	return auth, nil
 }
