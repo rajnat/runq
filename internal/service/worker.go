@@ -35,10 +35,11 @@ type WorkerProcess struct {
 }
 
 type activeRun struct {
-	RunID      string
-	LeaseToken int64
-	Progress   int
-	Aborted    bool
+	RunID        string
+	LeaseToken   int64
+	Progress     int
+	SentProgress int
+	Aborted      bool
 }
 
 type registerWorkerRequest struct {
@@ -369,6 +370,7 @@ func (w *WorkerProcess) sendHeartbeat(ctx context.Context) error {
 	for _, item := range items {
 		err := w.doJSON(ctx, http.MethodPost, path, heartbeatRequest{Running: []heartbeatRun{item}}, nil)
 		if err == nil {
+			w.markProgressSent(item.RunID, item.Progress)
 			w.metrics.IncCounter("runq_worker_heartbeats_sent_total")
 			continue
 		}
@@ -480,9 +482,10 @@ func (w *WorkerProcess) markRunning(runID string, leaseToken int64) bool {
 		return false
 	}
 	w.running[runID] = &activeRun{
-		RunID:      runID,
-		LeaseToken: leaseToken,
-		Progress:   0,
+		RunID:        runID,
+		LeaseToken:   leaseToken,
+		Progress:     0,
+		SentProgress: 0,
 	}
 	w.metrics.SetGauge("runq_worker_running_runs", int64(len(w.running)))
 	return true
@@ -500,6 +503,25 @@ func (w *WorkerProcess) setProgress(runID string, progress int) {
 	defer w.mu.Unlock()
 	if item, ok := w.running[runID]; ok {
 		item.Progress = progress
+	}
+}
+
+func (w *WorkerProcess) markProgressSent(runID string, progress map[string]any) {
+	if len(progress) == 0 {
+		return
+	}
+	value, ok := progress["percent"]
+	if !ok {
+		return
+	}
+	percent, ok := value.(int)
+	if !ok {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if item, exists := w.running[runID]; exists {
+		item.SentProgress = percent
 	}
 }
 
@@ -524,12 +546,16 @@ func (w *WorkerProcess) snapshotRunning() []heartbeatRun {
 
 	items := make([]heartbeatRun, 0, len(w.running))
 	for _, item := range w.running {
+		var progress map[string]any
+		if item.Progress != item.SentProgress {
+			progress = map[string]any{
+				"percent": item.Progress,
+			}
+		}
 		items = append(items, heartbeatRun{
 			RunID:      item.RunID,
 			LeaseToken: item.LeaseToken,
-			Progress: map[string]any{
-				"percent": item.Progress,
-			},
+			Progress:   progress,
 		})
 	}
 	return items

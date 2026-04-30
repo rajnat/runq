@@ -710,6 +710,78 @@ func TestValidateWorkerSessionRejectsExpiredSession(t *testing.T) {
 	}
 }
 
+func TestHeartbeatWorkerDoesNotPersistLeaseRenewedEvents(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	runID, workerID := createRunningRun(t, store, ctx, 30, 3)
+	beforeRun, beforeEvents, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get run before heartbeat: %v", err)
+	}
+
+	err = store.HeartbeatWorker(ctx, workerID, []HeartbeatUpdate{{
+		RunID:      runID,
+		LeaseToken: 1,
+	}}, 45*time.Second)
+	if err != nil {
+		t.Fatalf("heartbeat worker: %v", err)
+	}
+
+	afterRun, afterEvents, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get run after heartbeat: %v", err)
+	}
+	if afterRun.LastHeartbeatAt == nil {
+		t.Fatalf("expected last_heartbeat_at to be updated, got %+v", afterRun)
+	}
+	if beforeRun.LastHeartbeatAt != nil && !afterRun.LastHeartbeatAt.After(*beforeRun.LastHeartbeatAt) {
+		t.Fatalf("expected last_heartbeat_at to advance, before=%v after=%v", beforeRun.LastHeartbeatAt, afterRun.LastHeartbeatAt)
+	}
+	if afterRun.LeaseExpiresAt == nil || beforeRun.LeaseExpiresAt == nil || !afterRun.LeaseExpiresAt.After(*beforeRun.LeaseExpiresAt) {
+		t.Fatalf("expected lease_expires_at to advance, before=%v after=%v", beforeRun.LeaseExpiresAt, afterRun.LeaseExpiresAt)
+	}
+	if containsEvent(afterEvents, "LEASE_RENEWED") {
+		t.Fatalf("did not expect LEASE_RENEWED event after heartbeat without progress, got %+v", afterEvents)
+	}
+	if len(afterEvents) != len(beforeEvents) {
+		t.Fatalf("expected heartbeat without progress to avoid creating run events, before=%d after=%d", len(beforeEvents), len(afterEvents))
+	}
+}
+
+func TestHeartbeatWorkerPersistsLeaseRenewedEventWithProgress(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	resetTables(t, store)
+
+	runID, workerID := createRunningRun(t, store, ctx, 30, 3)
+	_, beforeEvents, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get run before heartbeat: %v", err)
+	}
+
+	err = store.HeartbeatWorker(ctx, workerID, []HeartbeatUpdate{{
+		RunID:      runID,
+		LeaseToken: 1,
+		Progress:   map[string]any{"pct": 50},
+	}}, 45*time.Second)
+	if err != nil {
+		t.Fatalf("heartbeat worker: %v", err)
+	}
+
+	_, afterEvents, err := store.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("get run after heartbeat: %v", err)
+	}
+	if !containsEvent(afterEvents, "LEASE_RENEWED") {
+		t.Fatalf("expected LEASE_RENEWED event after heartbeat progress update, got %+v", afterEvents)
+	}
+	if len(afterEvents) != len(beforeEvents)+1 {
+		t.Fatalf("expected exactly one heartbeat progress event, before=%d after=%d", len(beforeEvents), len(afterEvents))
+	}
+}
+
 func TestTriggerJobCreatesAdHocRunForCronJob(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

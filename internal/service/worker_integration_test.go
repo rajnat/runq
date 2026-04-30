@@ -685,6 +685,41 @@ func assertMetricContains(t *testing.T, rendered, pattern string) {
 	}
 }
 
+func TestSnapshotRunningOnlyIncludesProgressWhenChanged(t *testing.T) {
+	worker := NewWorkerProcess(log.New(io.Discard, "", 0), config.WorkerConfig{}, observability.NewRegistry())
+	if !worker.markRunning("run-1", 1) {
+		t.Fatal("expected markRunning to accept first run")
+	}
+
+	first := worker.snapshotRunning()
+	if len(first) != 1 {
+		t.Fatalf("expected one running item, got %+v", first)
+	}
+	if first[0].Progress != nil {
+		t.Fatalf("expected initial heartbeat snapshot to omit unchanged progress, got %+v", first[0].Progress)
+	}
+
+	worker.setProgress("run-1", 50)
+	second := worker.snapshotRunning()
+	if len(second) != 1 || second[0].Progress == nil || second[0].Progress["percent"] != 50 {
+		t.Fatalf("expected progress update in snapshot, got %+v", second)
+	}
+
+	third := worker.snapshotRunning()
+	if len(third) != 1 || third[0].Progress == nil || third[0].Progress["percent"] != 50 {
+		t.Fatalf("expected unsent progress to remain pending across failed heartbeat attempts, got %+v", third)
+	}
+
+	worker.markProgressSent("run-1", third[0].Progress)
+	fourth := worker.snapshotRunning()
+	if len(fourth) != 1 {
+		t.Fatalf("expected one running item after marking progress sent, got %+v", fourth)
+	}
+	if fourth[0].Progress != nil {
+		t.Fatalf("expected unchanged progress to be omitted after successful send, got %+v", fourth[0].Progress)
+	}
+}
+
 func containsEvent(events []store.RunEvent, eventType string) bool {
 	for _, event := range events {
 		if event.EventType == eventType {

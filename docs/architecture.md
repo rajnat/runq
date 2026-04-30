@@ -64,8 +64,9 @@ Core entities:
 1. worker registers identity and capabilities
 2. worker polls for assignments
 3. worker executes assignment and sends heartbeats
-4. worker completes or fails the run
-5. API/store writes run and audit/run-event state
+4. heartbeats renew lease state and refresh run heartbeat metadata without appending a durable event row per renewal
+5. worker completes or fails the run
+6. API/store writes run and audit/run-event state
 
 ### Failure recovery
 1. reaper scans for expired leases / timed-out runs

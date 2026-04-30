@@ -2557,10 +2557,6 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID string, updates []
 	}
 
 	for _, update := range updates {
-		progressJSON, err := json.Marshal(update.Progress)
-		if err != nil {
-			return fmt.Errorf("marshal progress: %w", err)
-		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE runs
 			SET last_heartbeat_at = $4,
@@ -2581,7 +2577,13 @@ func (s *Store) HeartbeatWorker(ctx context.Context, workerID string, updates []
 		if affected == 0 {
 			return ErrConflict
 		}
-
+		if len(update.Progress) == 0 {
+			continue
+		}
+		progressJSON, err := json.Marshal(update.Progress)
+		if err != nil {
+			return fmt.Errorf("marshal progress: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO run_events (run_id, event_type, actor_type, actor_id, payload)
 			VALUES ($1, 'LEASE_RENEWED', 'worker', $2, $3::jsonb)
