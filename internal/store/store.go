@@ -1177,7 +1177,49 @@ func (s *Store) ListRunsPage(ctx context.Context, filter RunFilter) ([]Run, bool
 	return runs, hasMore, next, nil
 }
 
-func (s *Store) GetRun(ctx context.Context, runID string) (Run, []RunEvent, error) {
+func (s *Store) ListRunEventsPage(ctx context.Context, runID string, limit, offset int) ([]RunEvent, bool, error) {
+	limit = clampPageLimit(limit)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT event_type, event_time, actor_type, actor_id, payload
+		FROM run_events
+		WHERE run_id = $1
+		ORDER BY id ASC
+		LIMIT $2 OFFSET $3
+	`, runID, limit+1, offset)
+	if err != nil {
+		return nil, false, fmt.Errorf("query run events: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]RunEvent, 0)
+	for rows.Next() {
+		var event RunEvent
+		var payloadBytes []byte
+		if err := rows.Scan(&event.EventType, &event.EventTime, &event.ActorType, &event.ActorID, &payloadBytes); err != nil {
+			return nil, false, fmt.Errorf("scan run event: %w", err)
+		}
+		if len(payloadBytes) > 0 {
+			if err := json.Unmarshal(payloadBytes, &event.Payload); err != nil {
+				return nil, false, fmt.Errorf("unmarshal run event payload: %w", err)
+			}
+		}
+		if event.Payload == nil {
+			event.Payload = map[string]any{}
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("run events rows error: %w", err)
+	}
+
+	hasMore := len(events) > limit
+	if hasMore {
+		events = events[:limit]
+	}
+	return events, hasMore, nil
+}
+
+func (s *Store) GetRunMetadata(ctx context.Context, runID string) (Run, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT r.id, r.job_id, j.name, j.tenant_id, j.queue, j.kind, j.schedule_type, j.disabled_at IS NOT NULL,
 		       r.status, r.attempt, r.scheduled_at, r.available_at, r.started_at,
@@ -1191,41 +1233,25 @@ func (s *Store) GetRun(ctx context.Context, runID string) (Run, []RunEvent, erro
 	run, err := scanRun(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, sql.ErrNoRows
+		}
+		return Run{}, err
+	}
+	return run, nil
+}
+
+func (s *Store) GetRun(ctx context.Context, runID string) (Run, []RunEvent, error) {
+	run, err := s.GetRunMetadata(ctx, runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			return Run{}, nil, sql.ErrNoRows
 		}
 		return Run{}, nil, err
 	}
 
-	eventRows, err := s.db.QueryContext(ctx, `
-		SELECT event_type, event_time, actor_type, actor_id, payload
-		FROM run_events
-		WHERE run_id = $1
-		ORDER BY id ASC
-	`, runID)
+	events, _, err := s.ListRunEventsPage(ctx, runID, 10000, 0)
 	if err != nil {
-		return Run{}, nil, fmt.Errorf("query run events: %w", err)
-	}
-	defer eventRows.Close()
-
-	events := make([]RunEvent, 0)
-	for eventRows.Next() {
-		var event RunEvent
-		var payloadBytes []byte
-		if err := eventRows.Scan(&event.EventType, &event.EventTime, &event.ActorType, &event.ActorID, &payloadBytes); err != nil {
-			return Run{}, nil, fmt.Errorf("scan run event: %w", err)
-		}
-		if len(payloadBytes) > 0 {
-			if err := json.Unmarshal(payloadBytes, &event.Payload); err != nil {
-				return Run{}, nil, fmt.Errorf("unmarshal run event payload: %w", err)
-			}
-		}
-		if event.Payload == nil {
-			event.Payload = map[string]any{}
-		}
-		events = append(events, event)
-	}
-	if err := eventRows.Err(); err != nil {
-		return Run{}, nil, fmt.Errorf("run events rows error: %w", err)
+		return Run{}, nil, err
 	}
 
 	return run, events, nil

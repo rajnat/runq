@@ -116,8 +116,9 @@ type FailRunRequest struct {
 }
 
 type GetRunResponse struct {
-	Run    store.Run        `json:"run"`
-	Events []store.RunEvent `json:"events"`
+	Run              store.Run        `json:"run"`
+	Events           []store.RunEvent `json:"events"`
+	EventsPagination PaginationMeta   `json:"events_pagination"`
 }
 
 type PaginationMeta struct {
@@ -137,6 +138,11 @@ type ListJobsResponse struct {
 type ListRunsResponse struct {
 	Runs       []store.Run    `json:"runs"`
 	Pagination PaginationMeta `json:"pagination"`
+}
+
+type ListRunEventsResponse struct {
+	Events     []store.RunEvent `json:"events"`
+	Pagination PaginationMeta   `json:"pagination"`
 }
 
 type ListWorkersResponse struct {

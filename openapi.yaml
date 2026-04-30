@@ -320,14 +320,23 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  run:
-                    $ref: '#/components/schemas/Run'
-                  events:
-                    type: array
-                    items: { type: object }
-                required: [run, events]
+                $ref: '#/components/schemas/GetRunResponse'
+
+  /v1/runs/{runID}/events:
+    get:
+      tags: [runs]
+      summary: List events for a run
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Run event list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListRunEventsResponse'
 
   /v1/runs/requeue:
     post:
@@ -1013,6 +1022,24 @@ components:
         runs:
           type: array
           items: { $ref: '#/components/schemas/Run' }
+        pagination: { $ref: '#/components/schemas/PaginationMeta' }
+
+    GetRunResponse:
+      type: object
+      properties:
+        run: { $ref: '#/components/schemas/Run' }
+        events:
+          type: array
+          items: { type: object }
+        events_pagination: { $ref: '#/components/schemas/PaginationMeta' }
+      required: [run, events, events_pagination]
+
+    ListRunEventsResponse:
+      type: object
+      properties:
+        events:
+          type: array
+          items: { type: object }
         pagination: { $ref: '#/components/schemas/PaginationMeta' }
 
     ListWorkersResponse:

@@ -183,6 +183,105 @@ func TestGetJobEndpointReturnsCreatedJob(t *testing.T) {
 	}
 }
 
+func TestGetRunEndpointBoundsEmbeddedEvents(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-run-bounded-events",
+		"tenant_id": "tenant-api",
+		"queue":     "api-run-bounded-events",
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/bounded"},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", status)
+	}
+
+	for i := 0; i < 105; i++ {
+		payload := fmt.Sprintf(`{"step":%d}`, i)
+		if _, err := jobStore.DB().ExecContext(context.Background(), `
+			INSERT INTO run_events (run_id, event_type, actor_type, payload)
+			VALUES ($1, 'RUN_PROGRESS', 'worker', $2::jsonb)
+		`, *createResp.RunID, payload); err != nil {
+			t.Fatalf("insert run event %d: %v", i, err)
+		}
+	}
+
+	var runResp struct {
+		Run              store.Run        `json:"run"`
+		Events           []store.RunEvent `json:"events"`
+		EventsPagination PaginationMeta   `json:"events_pagination"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs/"+*createResp.RunID, nil, &runResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 get run, got %d", status)
+	}
+	if len(runResp.Events) != 100 {
+		t.Fatalf("expected bounded embedded events length 100, got %d", len(runResp.Events))
+	}
+	if !runResp.EventsPagination.HasMore || runResp.EventsPagination.NextOffset == nil || *runResp.EventsPagination.NextOffset != 100 {
+		t.Fatalf("expected bounded events pagination metadata, got %+v", runResp.EventsPagination)
+	}
+	if runResp.EventsPagination.Returned != len(runResp.Events) {
+		t.Fatalf("expected returned count to match events length, got %+v", runResp.EventsPagination)
+	}
+}
+
+func TestListRunEventsEndpointPaginates(t *testing.T) {
+	jobStore := openTestStore(t)
+	resetTablesForAPI(t, jobStore)
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var createResp CreateJobResponse
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs", map[string]any{
+		"name":      "api-run-events-page",
+		"tenant_id": "tenant-api",
+		"queue":     "api-run-events-page",
+		"kind":      "http",
+		"payload":   map[string]any{"url": "https://example.internal/events"},
+	}, &createResp)
+	if status != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", status)
+	}
+
+	for i := 0; i < 3; i++ {
+		payload := fmt.Sprintf(`{"step":%d}`, i)
+		if _, err := jobStore.DB().ExecContext(context.Background(), `
+			INSERT INTO run_events (run_id, event_type, actor_type, payload)
+			VALUES ($1, 'RUN_PROGRESS', 'worker', $2::jsonb)
+		`, *createResp.RunID, payload); err != nil {
+			t.Fatalf("insert run event %d: %v", i, err)
+		}
+	}
+
+	var eventsResp struct {
+		Events     []store.RunEvent `json:"events"`
+		Pagination PaginationMeta   `json:"pagination"`
+	}
+	status = doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodGet, httpServer.URL+"/v1/runs/"+*createResp.RunID+"/events?limit=2&offset=1", nil, &eventsResp)
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 list run events, got %d", status)
+	}
+	if len(eventsResp.Events) != 2 {
+		t.Fatalf("expected 2 paged events, got %+v", eventsResp.Events)
+	}
+	if !eventsResp.Pagination.HasMore || eventsResp.Pagination.NextOffset == nil || *eventsResp.Pagination.NextOffset != 3 {
+		t.Fatalf("expected pagination next_offset=3 with has_more, got %+v", eventsResp.Pagination)
+	}
+	if eventsResp.Events[0].Payload["step"] != float64(0) || eventsResp.Events[1].Payload["step"] != float64(1) {
+		t.Fatalf("expected paged run event payloads with steps 0 and 1, got %+v", eventsResp.Events)
+	}
+}
+
 func TestUpdateJobEndpoint(t *testing.T) {
 	jobStore := openTestStore(t)
 	resetTablesForAPI(t, jobStore)

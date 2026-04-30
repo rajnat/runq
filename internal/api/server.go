@@ -115,6 +115,7 @@ func (s *Server) routes() {
 	s.handle("GET /v1/audit/events", s.handleListAuditEvents)
 	s.handle("GET /v1/runs", s.handleListRuns)
 	s.handle("GET /v1/runs/{runID}", s.handleGetRun)
+	s.handle("GET /v1/runs/{runID}/events", s.handleListRunEvents)
 	s.handle("POST /v1/runs/requeue", s.handleBulkRequeueRuns)
 	s.handle("POST /v1/runs/redrive", s.handleBulkRedriveRuns)
 	s.handle("POST /v1/runs/cancel", s.handleBulkCancelRuns)
@@ -1325,7 +1326,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	run, events, err := s.store.GetRun(ctx, r.PathValue("runID"))
+	run, err := s.store.GetRunMetadata(ctx, r.PathValue("runID"))
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "CONFLICT", "failed to load run")
@@ -1345,9 +1346,69 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	events, hasMore, err := s.store.ListRunEventsPage(ctx, run.ID, 100, 0)
+	if err != nil {
+		s.logger.Printf("list embedded run events failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to get run")
+		return
+	}
+	pagination := paginationMeta(100, 0, len(events), hasMore)
+
 	writeJSON(w, http.StatusOK, GetRunResponse{
-		Run:    run,
-		Events: events,
+		Run:              run,
+		Events:           events,
+		EventsPagination: pagination,
+	})
+}
+
+func (s *Server) handleListRunEvents(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.authenticateRequest(w, r)
+	if !ok {
+		return
+	}
+	if principal.Role == roleWorker {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "worker principals cannot inspect runs")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	limit, err := parseOptionalInt(r.URL.Query().Get("limit"), 1)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "limit must be a positive integer")
+		return
+	}
+	limit = clampPageLimit(limit)
+	offset, err := parseOptionalInt(r.URL.Query().Get("offset"), 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "offset must be zero or greater")
+		return
+	}
+
+	run, err := s.store.GetRunMetadata(ctx, r.PathValue("runID"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
+			return
+		}
+		s.logger.Printf("get run for events failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load run")
+		return
+	}
+	if !canAccessTenant(principal, run.TenantID) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return
+	}
+
+	events, hasMore, err := s.store.ListRunEventsPage(ctx, run.ID, limit, offset)
+	if err != nil {
+		s.logger.Printf("list run events failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list run events")
+		return
+	}
+	writeJSON(w, http.StatusOK, ListRunEventsResponse{
+		Events:     events,
+		Pagination: paginationMeta(limit, offset, len(events), hasMore),
 	})
 }
 

@@ -189,6 +189,17 @@ Supported filters today:
 
 `GET /v1/runs/{runID}`
 
+Run detail includes an embedded, bounded `events` slice plus `events_pagination` metadata.
+When a run has a longer history, use `events_pagination.next_offset` with the dedicated run-events endpoint below.
+
+### List run events for a run
+
+`GET /v1/runs/{runID}/events`
+
+Supported query params today:
+- `limit`
+- `offset`
+
 ### Run lifecycle endpoints
 
 Single-run endpoints:
