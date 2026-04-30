@@ -111,6 +111,9 @@ Operational safeguards:
 - inspect worker filters and capabilities
 - inspect tenant quotas and queue assignments
 - inspect `/v1/workers` and `/v1/runs`
+- if the job was paused, pending runs will not be claimed until resume
+- if the job was disabled, pending runs remain stored but are intentionally unclaimable until enable
+- if the intent is to stop and clear pending work, use job cancel rather than disable
 
 ### Runs stuck in RUNNING
 - check worker heartbeat freshness in worker detail

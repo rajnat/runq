@@ -155,6 +155,13 @@ Bulk lifecycle semantics:
 - skipped items carry explicit `error_code` and `error_message`
 - dry-run returns `would_change` / `would_skip` without mutation
 
+Current single-job lifecycle semantics:
+- `pause` prevents pending runs from being claimed until the job is resumed
+- `disable` prevents future pending runs from being claimed
+- `disable` does not cancel already running runs
+- `disable` does not retroactively cancel existing pending runs; they remain persisted but unclaimable until the job is enabled again
+- `cancel` is the lifecycle action that both disables the job and cancels its pending runs
+
 ## Runs
 
 ### List runs
