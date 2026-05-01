@@ -10,11 +10,14 @@ import (
 )
 
 const (
-	defaultAPIAddr       = ":8080"
-	defaultAPIBaseURL    = "http://localhost:8080"
-	defaultDBConnString  = "postgres://runq:runq@localhost:5432/runq?sslmode=disable"
-	defaultTickInterval  = 5 * time.Second
-	defaultMigrationsDir = "migrations"
+	defaultAPIAddr           = ":8080"
+	defaultAPIBaseURL        = "http://localhost:8080"
+	defaultDBConnString      = "postgres://runq:***@localhost:5432/runq?sslmode=disable"
+	defaultTickInterval      = 5 * time.Second
+	defaultMigrationsDir     = "migrations"
+	defaultDBMaxIdleConns    = 4
+	defaultDBMaxOpenConns    = 8
+	defaultDBConnMaxLifetime = 30 * time.Minute
 )
 
 type APIConfig struct {
@@ -23,7 +26,18 @@ type APIConfig struct {
 	AuthTokens                string
 	InsecureDevMode           bool
 	MetricsAddress            string
+	MetricsReadTimeout        time.Duration
+	MetricsWriteTimeout       time.Duration
+	MetricsIdleTimeout        time.Duration
+	MetricsReadHeaderTimeout  time.Duration
 	TraceEndpoint             string
+	DBMaxIdleConns            int
+	DBMaxOpenConns            int
+	DBConnMaxLifetime         time.Duration
+	ReadTimeout               time.Duration
+	WriteTimeout              time.Duration
+	IdleTimeout               time.Duration
+	ReadHeaderTimeout         time.Duration
 	WorkerHeartbeatInterval   time.Duration
 	WorkerLeaseDuration       time.Duration
 	WorkerSessionTTL          time.Duration
@@ -36,14 +50,21 @@ type APIConfig struct {
 }
 
 type ComponentConfig struct {
-	ComponentName     string
-	DBConnString      string
-	TickInterval      time.Duration
-	LeaseDuration     time.Duration
-	ClaimBatchSize    int
-	TenantMaxInflight int
-	MetricsAddress    string
-	TraceEndpoint     string
+	ComponentName            string
+	DBConnString             string
+	TickInterval             time.Duration
+	LeaseDuration            time.Duration
+	ClaimBatchSize           int
+	TenantMaxInflight        int
+	MetricsAddress           string
+	MetricsReadTimeout       time.Duration
+	MetricsWriteTimeout      time.Duration
+	MetricsIdleTimeout       time.Duration
+	MetricsReadHeaderTimeout time.Duration
+	TraceEndpoint            string
+	DBMaxIdleConns           int
+	DBMaxOpenConns           int
+	DBConnMaxLifetime        time.Duration
 }
 
 type MigrationConfig struct {
@@ -52,17 +73,21 @@ type MigrationConfig struct {
 }
 
 type WorkerConfig struct {
-	APIBaseURL        string
-	AuthToken         string
-	Name              string
-	Queues            []string
-	Capabilities      []string
-	MaxConcurrency    int
-	PollInterval      time.Duration
-	HeartbeatInterval time.Duration
-	ExecutionTime     time.Duration
-	MetricsAddress    string
-	TraceEndpoint     string
+	APIBaseURL               string
+	AuthToken                string
+	Name                     string
+	Queues                   []string
+	Capabilities             []string
+	MaxConcurrency           int
+	PollInterval             time.Duration
+	HeartbeatInterval        time.Duration
+	ExecutionTime            time.Duration
+	MetricsAddress           string
+	MetricsReadTimeout       time.Duration
+	MetricsWriteTimeout      time.Duration
+	MetricsIdleTimeout       time.Duration
+	MetricsReadHeaderTimeout time.Duration
+	TraceEndpoint            string
 }
 
 func (c APIConfig) Validate() error {
@@ -105,7 +130,18 @@ func LoadAPI() APIConfig {
 		AuthTokens:                envOrDefault("RUNQ_API_TOKENS", ""),
 		InsecureDevMode:           boolEnvOrDefault("RUNQ_INSECURE_DEV_MODE", false),
 		MetricsAddress:            envOrDefault("RUNQ_API_METRICS_ADDR", "127.0.0.1:9090"),
+		MetricsReadTimeout:        durationEnvOrDefault("RUNQ_METRICS_READ_TIMEOUT_SECONDS", 15*time.Second),
+		MetricsWriteTimeout:       durationEnvOrDefault("RUNQ_METRICS_WRITE_TIMEOUT_SECONDS", 15*time.Second),
+		MetricsIdleTimeout:        durationEnvOrDefault("RUNQ_METRICS_IDLE_TIMEOUT_SECONDS", 60*time.Second),
+		MetricsReadHeaderTimeout:  durationEnvOrDefault("RUNQ_METRICS_READ_HEADER_TIMEOUT_SECONDS", 5*time.Second),
 		TraceEndpoint:             envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
+		DBMaxIdleConns:            intEnvOrDefaultAllowZero("RUNQ_DB_MAX_IDLE_CONNS", defaultDBMaxIdleConns),
+		DBMaxOpenConns:            intEnvOrDefault("RUNQ_DB_MAX_OPEN_CONNS", defaultDBMaxOpenConns),
+		DBConnMaxLifetime:         durationEnvOrDefault("RUNQ_DB_CONN_MAX_LIFETIME_SECONDS", defaultDBConnMaxLifetime),
+		ReadTimeout:               durationEnvOrDefault("RUNQ_API_READ_TIMEOUT_SECONDS", 15*time.Second),
+		WriteTimeout:              durationEnvOrDefault("RUNQ_API_WRITE_TIMEOUT_SECONDS", 15*time.Second),
+		IdleTimeout:               durationEnvOrDefault("RUNQ_API_IDLE_TIMEOUT_SECONDS", 60*time.Second),
+		ReadHeaderTimeout:         durationEnvOrDefault("RUNQ_API_READ_HEADER_TIMEOUT_SECONDS", 5*time.Second),
 		WorkerHeartbeatInterval:   durationEnvOrDefault("RUNQ_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5*time.Second),
 		WorkerLeaseDuration:       durationEnvOrDefault("RUNQ_LEASE_DURATION_SECONDS", 30*time.Second),
 		WorkerSessionTTL:          durationEnvOrDefault("RUNQ_WORKER_SESSION_TTL_SECONDS", 24*time.Hour),
@@ -120,14 +156,21 @@ func LoadAPI() APIConfig {
 
 func LoadComponent(name string) ComponentConfig {
 	return ComponentConfig{
-		ComponentName:     name,
-		DBConnString:      envOrDefault("RUNQ_DATABASE_URL", defaultDBConnString),
-		TickInterval:      durationEnvOrDefault("RUNQ_TICK_INTERVAL_SECONDS", defaultTickInterval),
-		LeaseDuration:     durationEnvOrDefault("RUNQ_LEASE_DURATION_SECONDS", 30*time.Second),
-		ClaimBatchSize:    intEnvOrDefault("RUNQ_CLAIM_BATCH_SIZE", 10),
-		TenantMaxInflight: intEnvOrDefaultAllowZero("RUNQ_TENANT_MAX_INFLIGHT", 0),
-		MetricsAddress:    envOrDefault(componentMetricsEnvKey(name), defaultComponentMetricsAddr(name)),
-		TraceEndpoint:     envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
+		ComponentName:            name,
+		DBConnString:             envOrDefault("RUNQ_DATABASE_URL", defaultDBConnString),
+		TickInterval:             durationEnvOrDefault("RUNQ_TICK_INTERVAL_SECONDS", defaultTickInterval),
+		LeaseDuration:            durationEnvOrDefault("RUNQ_LEASE_DURATION_SECONDS", 30*time.Second),
+		ClaimBatchSize:           intEnvOrDefault("RUNQ_CLAIM_BATCH_SIZE", 10),
+		TenantMaxInflight:        intEnvOrDefaultAllowZero("RUNQ_TENANT_MAX_INFLIGHT", 0),
+		MetricsAddress:           envOrDefault(componentMetricsEnvKey(name), defaultComponentMetricsAddr(name)),
+		MetricsReadTimeout:       durationEnvOrDefault("RUNQ_METRICS_READ_TIMEOUT_SECONDS", 15*time.Second),
+		MetricsWriteTimeout:      durationEnvOrDefault("RUNQ_METRICS_WRITE_TIMEOUT_SECONDS", 15*time.Second),
+		MetricsIdleTimeout:       durationEnvOrDefault("RUNQ_METRICS_IDLE_TIMEOUT_SECONDS", 60*time.Second),
+		MetricsReadHeaderTimeout: durationEnvOrDefault("RUNQ_METRICS_READ_HEADER_TIMEOUT_SECONDS", 5*time.Second),
+		TraceEndpoint:            envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
+		DBMaxIdleConns:           intEnvOrDefaultAllowZero("RUNQ_DB_MAX_IDLE_CONNS", defaultDBMaxIdleConns),
+		DBMaxOpenConns:           intEnvOrDefault("RUNQ_DB_MAX_OPEN_CONNS", defaultDBMaxOpenConns),
+		DBConnMaxLifetime:        durationEnvOrDefault("RUNQ_DB_CONN_MAX_LIFETIME_SECONDS", defaultDBConnMaxLifetime),
 	}
 }
 
@@ -140,17 +183,21 @@ func LoadMigration() MigrationConfig {
 
 func LoadWorker() WorkerConfig {
 	return WorkerConfig{
-		APIBaseURL:        envOrDefault("RUNQ_API_BASE_URL", defaultAPIBaseURL),
-		AuthToken:         envOrDefault("RUNQ_WORKER_AUTH_TOKEN", ""),
-		Name:              envOrDefault("RUNQ_WORKER_NAME", defaultWorkerName()),
-		Queues:            csvEnvOrDefault("RUNQ_WORKER_QUEUES", []string{"default"}),
-		Capabilities:      csvEnvOrDefault("RUNQ_WORKER_CAPABILITIES", []string{"http"}),
-		MaxConcurrency:    intEnvOrDefault("RUNQ_WORKER_MAX_CONCURRENCY", 4),
-		PollInterval:      durationEnvOrDefault("RUNQ_WORKER_POLL_INTERVAL_SECONDS", 2*time.Second),
-		HeartbeatInterval: durationEnvOrDefault("RUNQ_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5*time.Second),
-		ExecutionTime:     durationEnvOrDefault("RUNQ_WORKER_EXECUTION_SECONDS", 3*time.Second),
-		MetricsAddress:    envOrDefault("RUNQ_WORKER_METRICS_ADDR", "127.0.0.1:9093"),
-		TraceEndpoint:     envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
+		APIBaseURL:               envOrDefault("RUNQ_API_BASE_URL", defaultAPIBaseURL),
+		AuthToken:                envOrDefault("RUNQ_WORKER_AUTH_TOKEN", ""),
+		Name:                     envOrDefault("RUNQ_WORKER_NAME", defaultWorkerName()),
+		Queues:                   csvEnvOrDefault("RUNQ_WORKER_QUEUES", []string{"default"}),
+		Capabilities:             csvEnvOrDefault("RUNQ_WORKER_CAPABILITIES", []string{"http"}),
+		MaxConcurrency:           intEnvOrDefault("RUNQ_WORKER_MAX_CONCURRENCY", 4),
+		PollInterval:             durationEnvOrDefault("RUNQ_WORKER_POLL_INTERVAL_SECONDS", 2*time.Second),
+		HeartbeatInterval:        durationEnvOrDefault("RUNQ_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5*time.Second),
+		ExecutionTime:            durationEnvOrDefault("RUNQ_WORKER_EXECUTION_SECONDS", 3*time.Second),
+		MetricsAddress:           envOrDefault("RUNQ_WORKER_METRICS_ADDR", "127.0.0.1:9093"),
+		MetricsReadTimeout:       durationEnvOrDefault("RUNQ_METRICS_READ_TIMEOUT_SECONDS", 15*time.Second),
+		MetricsWriteTimeout:      durationEnvOrDefault("RUNQ_METRICS_WRITE_TIMEOUT_SECONDS", 15*time.Second),
+		MetricsIdleTimeout:       durationEnvOrDefault("RUNQ_METRICS_IDLE_TIMEOUT_SECONDS", 60*time.Second),
+		MetricsReadHeaderTimeout: durationEnvOrDefault("RUNQ_METRICS_READ_HEADER_TIMEOUT_SECONDS", 5*time.Second),
+		TraceEndpoint:            envOrDefault("RUNQ_TRACE_OTLP_ENDPOINT", ""),
 	}
 }
 

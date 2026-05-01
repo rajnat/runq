@@ -522,15 +522,29 @@ type JobLifecycleResult struct {
 	Status string
 }
 
+type OpenConfig struct {
+	MaxIdleConns    int
+	MaxOpenConns    int
+	ConnMaxLifetime time.Duration
+}
+
 func Open(databaseURL string) (*Store, error) {
+	return OpenWithConfig(databaseURL, OpenConfig{
+		MaxIdleConns:    4,
+		MaxOpenConns:    8,
+		ConnMaxLifetime: 30 * time.Minute,
+	})
+}
+
+func OpenWithConfig(databaseURL string, cfg OpenConfig) (*Store, error) {
 	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	db.SetMaxIdleConns(4)
-	db.SetMaxOpenConns(8)
-	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetMaxIdleConns(cfg.MaxIdleConns)
+	db.SetMaxOpenConns(cfg.MaxOpenConns)
+	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 
 	return &Store{db: db}, nil
 }

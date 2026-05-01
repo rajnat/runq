@@ -28,7 +28,7 @@ func main() {
 	defer func() {
 		_ = shutdownTracing(context.Background())
 	}()
-	observability.RunMetricsServer(ctx, logger, cfg.MetricsAddress, metrics)
+	observability.RunMetricsServer(ctx, logger, cfg.MetricsAddress, cfg.MetricsReadHeaderTimeout, cfg.MetricsReadTimeout, cfg.MetricsWriteTimeout, cfg.MetricsIdleTimeout, metrics)
 
 	worker := service.NewWorkerProcess(logger, cfg, metrics)
 	if err := worker.Run(ctx); err != nil && err != context.Canceled {

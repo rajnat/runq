@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func RunMetricsServer(ctx context.Context, logger *log.Logger, address string, registry *Registry) {
+func RunMetricsServer(ctx context.Context, logger *log.Logger, address string, readHeaderTimeout, readTimeout, writeTimeout, idleTimeout time.Duration, registry *Registry) {
 	if address == "" {
 		return
 	}
@@ -18,7 +18,10 @@ func RunMetricsServer(ctx context.Context, logger *log.Logger, address string, r
 	server := &http.Server{
 		Addr:              address,
 		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	go func() {

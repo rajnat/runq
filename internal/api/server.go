@@ -63,7 +63,10 @@ func (s *Server) Run(ctx context.Context) error {
 	httpServer := &http.Server{
 		Addr:              s.cfg.Address,
 		Handler:           s.mux,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
+		ReadTimeout:       s.cfg.ReadTimeout,
+		WriteTimeout:      s.cfg.WriteTimeout,
+		IdleTimeout:       s.cfg.IdleTimeout,
 	}
 
 	s.logger.Printf("starting api server on %s", s.cfg.Address)

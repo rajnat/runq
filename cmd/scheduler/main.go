@@ -26,13 +26,17 @@ func main() {
 	defer func() {
 		_ = shutdownTracing(context.Background())
 	}()
-	jobStore, err := store.Open(cfg.DBConnString)
+	jobStore, err := store.OpenWithConfig(cfg.DBConnString, store.OpenConfig{
+		MaxIdleConns:    cfg.DBMaxIdleConns,
+		MaxOpenConns:    cfg.DBMaxOpenConns,
+		ConnMaxLifetime: cfg.DBConnMaxLifetime,
+	})
 	if err != nil {
 		logger.Fatal(err)
 	}
 	defer jobStore.Close()
 
-	observability.RunMetricsServer(ctx, logger, cfg.MetricsAddress, metrics)
+	observability.RunMetricsServer(ctx, logger, cfg.MetricsAddress, cfg.MetricsReadHeaderTimeout, cfg.MetricsReadTimeout, cfg.MetricsWriteTimeout, cfg.MetricsIdleTimeout, metrics)
 
 	scheduler := service.NewScheduler(logger, jobStore, cfg, metrics)
 	if err := scheduler.Run(ctx); err != nil && err != context.Canceled {
