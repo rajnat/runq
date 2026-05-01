@@ -2157,6 +2157,12 @@ func (s *Store) ClaimPendingRuns(ctx context.Context, batchSize int, leaseDurati
 	}
 	rows.Close()
 	summary.CandidateRuns = len(candidates)
+	if len(candidates) == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, ClaimSummary{}, fmt.Errorf("commit claim tx: %w", err)
+		}
+		return nil, summary, nil
+	}
 	candidates = fairOrderCandidates(candidates)
 
 	workerRows, err := tx.QueryContext(ctx, `
