@@ -47,7 +47,7 @@ make migrate
 Start the API server:
 
 ```bash
-RUNQ_API_TOKENS='admin-token:admin,tenant-token:tenant:tenant-api,worker-token:worker:worker-api' \
+RUNQ_API_TOKENS='admin-...-api' \
 make run-api
 ```
 
@@ -61,7 +61,7 @@ make run-reaper
 Start a sample worker:
 
 ```bash
-RUNQ_WORKER_AUTH_TOKEN=worker-token \
+RUNQ_WORKER_AUTH_TOKEN=*** \
 RUNQ_WORKER_NAME=worker-api \
 RUNQ_API_BASE_URL=http://localhost:8080 \
 make run-worker
@@ -79,7 +79,7 @@ Create a job:
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/jobs \
-  -H 'Authorization: Bearer tenant-token' \
+  -H 'Authorization: Bearer ***' \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "demo-job",
@@ -94,14 +94,14 @@ List jobs:
 
 ```bash
 curl -s 'http://localhost:8080/v1/jobs?tenant_id=tenant-api' \
-  -H 'Authorization: Bearer tenant-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 Inspect a job by dedupe key:
 
 ```bash
 curl -s 'http://localhost:8080/v1/jobs/lookup?tenant_id=tenant-api&dedupe_key=my-key' \
-  -H 'Authorization: Bearer tenant-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 ## Local observability

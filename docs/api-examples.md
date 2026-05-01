@@ -10,8 +10,9 @@ Request:
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/jobs \
-  -H 'Authorization: Bearer tenant-token' \
+  -H 'Authorization: Bearer ***' \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: job-create-001' \
   -d '{
     "name": "example-job",
     "tenant_id": "tenant-api",
@@ -36,7 +37,7 @@ Example response:
 
 ```bash
 curl -s 'http://localhost:8080/v1/jobs?tenant_id=tenant-api&name=example-job&dedupe_key=example-job-key' \
-  -H 'Authorization: Bearer tenant-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 Example response:
@@ -72,7 +73,7 @@ Example response:
 
 ```bash
 curl -s 'http://localhost:8080/v1/jobs/lookup?tenant_id=tenant-api&dedupe_key=example-job-key' \
-  -H 'Authorization: Bearer tenant-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 ## Runs
@@ -81,7 +82,7 @@ curl -s 'http://localhost:8080/v1/jobs/lookup?tenant_id=tenant-api&dedupe_key=ex
 
 ```bash
 curl -s 'http://localhost:8080/v1/runs?tenant_id=tenant-api&status=FAILED&error_code=TIMEOUT' \
-  -H 'Authorization: Bearer tenant-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 Example response:
@@ -117,11 +118,25 @@ Example response:
 }
 ```
 
+### Get run detail with bounded embedded events
+
+```bash
+curl -s 'http://localhost:8080/v1/runs/run-123' \
+  -H 'Authorization: Bearer ***'
+```
+
+### Page through run events
+
+```bash
+curl -s 'http://localhost:8080/v1/runs/run-123/events?limit=50&offset=0' \
+  -H 'Authorization: Bearer ***'
+```
+
 ### Bulk requeue dry-run
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/runs/requeue \
-  -H 'Authorization: Bearer tenant-token' \
+  -H 'Authorization: Bearer ***' \
   -H 'Content-Type: application/json' \
   -d '{
     "tenant_id": "tenant-api",
@@ -136,14 +151,14 @@ curl -s -X POST http://localhost:8080/v1/runs/requeue \
 
 ```bash
 curl -s 'http://localhost:8080/v1/workers?queue=default&capability=http' \
-  -H 'Authorization: Bearer admin-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 ### Get worker detail
 
 ```bash
 curl -s 'http://localhost:8080/v1/workers/worker-123' \
-  -H 'Authorization: Bearer admin-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 Example response:
@@ -185,11 +200,21 @@ Example response:
 }
 ```
 
+### Worker protocol poll
+
+```bash
+curl -s -X POST http://localhost:8080/v1/workers/worker-123/poll \
+  -H 'Authorization: Bearer ***' \
+  -H 'X-Runq-Worker-Session: ws-123' \
+  -H 'Content-Type: application/json' \
+  -d '{"available_slots": 1}'
+```
+
 ### Reactivate a drained worker
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/workers/worker-123/reactivate \
-  -H 'Authorization: Bearer admin-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 ## Quotas
@@ -198,7 +223,7 @@ curl -s -X POST http://localhost:8080/v1/workers/worker-123/reactivate \
 
 ```bash
 curl -s -X PUT http://localhost:8080/v1/tenants/tenant-api/quota \
-  -H 'Authorization: Bearer admin-token' \
+  -H 'Authorization: Bearer ***' \
   -H 'Content-Type: application/json' \
   -d '{
     "max_inflight": 10,
@@ -213,7 +238,7 @@ curl -s -X PUT http://localhost:8080/v1/tenants/tenant-api/quota \
 
 ```bash
 curl -s 'http://localhost:8080/v1/audit/events?actor_id=admin-user&resource_type=job' \
-  -H 'Authorization: Bearer admin-token'
+  -H 'Authorization: Bearer ***'
 ```
 
 ## Stable error envelope

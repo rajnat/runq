@@ -21,11 +21,11 @@ This document describes the current security posture and near-term hardening pri
 
 These are known gaps in the present implementation:
 - static tokens are operationally simple but weak for long-term production use
-- auth can still be configured in insecure ways if operators leave tokens empty or overly broad
+- auth can still be configured in insecure ways if operators choose insecure dev mode deliberately, though it is now restricted to loopback binds
 - application-layer tenant isolation is weaker than DB-enforced isolation
 - metrics endpoints are convenient locally but should not be internet-exposed by default
-- mutating endpoints do not yet use idempotency keys
-- rate limiting is not yet enforced
+- idempotency is currently implemented for job creation, not all mutating endpoints
+- rate limiting is enforced, but it is still intentionally simple and local-process only
 
 ## Current safe-use guidance
 

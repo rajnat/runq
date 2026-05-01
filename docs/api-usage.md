@@ -6,7 +6,7 @@ Base URL:
 - `http://localhost:8080`
 
 Auth header:
-- `Authorization: Bearer <token>`
+- `Authorization: Bearer ***`
 
 ## Auth model
 
@@ -19,6 +19,19 @@ Examples:
 - admin token can manage all tenants and workers
 - tenant token can only see and mutate that tenant's jobs/runs
 - worker token can only operate as the configured worker identity
+
+Worker protocol auth:
+- worker protocol calls still use `Authorization: Bearer ***`
+- after `POST /v1/workers/register`, the worker must also send `X-Runq-Worker-Session: <worker_session_token>` on:
+  - `POST /v1/workers/{workerID}/poll`
+  - `POST /v1/workers/{workerID}/heartbeat`
+  - `POST /v1/workers/{workerID}/complete`
+  - `POST /v1/workers/{workerID}/fail`
+- worker session tokens rotate on re-registration and expire based on server configuration
+
+Rate limiting:
+- requests are rate-limited before bearer-token validation using source-based limiting
+- authenticated traffic is also rate-limited per token and, for tenant principals, per tenant
 
 ## Tenancy and quotas
 
@@ -45,6 +58,11 @@ Quota effects show up primarily during job admission and scheduler assignment.
 ### Create a once job
 
 `POST /v1/jobs`
+
+Retry safety:
+- create-job requests support the `Idempotency-Key` header
+- resend the same request body with the same key to safely retry client/network failures
+- reusing a key with a different request body is rejected as a conflict
 
 ```json
 {
