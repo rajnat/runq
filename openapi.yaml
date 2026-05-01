@@ -8,6 +8,9 @@ info:
 servers:
   - url: http://localhost:8080
 
+security:
+  - bearerAuth: []
+
 tags:
   - name: jobs
   - name: runs
@@ -60,6 +63,8 @@ paths:
     post:
       tags: [jobs]
       summary: Create a job
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -651,6 +656,11 @@ paths:
 
 components:
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
     TenantID:
       name: tenant_id
       in: query
@@ -718,6 +728,12 @@ components:
           schema:
             type: object
             additionalProperties: true
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
 
   schemas:
     ErrorEnvelope:
@@ -1030,7 +1046,7 @@ components:
         run: { $ref: '#/components/schemas/Run' }
         events:
           type: array
-          items: { type: object }
+          items: { $ref: '#/components/schemas/RunEvent' }
         events_pagination: { $ref: '#/components/schemas/PaginationMeta' }
       required: [run, events, events_pagination]
 
@@ -1039,8 +1055,17 @@ components:
       properties:
         events:
           type: array
-          items: { type: object }
+          items: { $ref: '#/components/schemas/RunEvent' }
         pagination: { $ref: '#/components/schemas/PaginationMeta' }
+
+    RunEvent:
+      type: object
+      properties:
+        event_type: { type: string }
+        event_time: { type: string, format: date-time }
+        actor_type: { type: string }
+        actor_id: { type: string, nullable: true }
+        payload: { type: object, additionalProperties: true }
 
     ListWorkersResponse:
       type: object
