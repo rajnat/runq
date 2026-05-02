@@ -21,6 +21,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+var errBulkSelectionTooBroad = errors.New("bulk selection exceeds maximum")
+
 type Server struct {
 	cfg            config.APIConfig
 	logger         *log.Logger
@@ -438,7 +440,7 @@ func (s *Server) selectJobsForBulkOperation(ctx context.Context, principal princ
 	if !allowed {
 		return nil, store.ErrConflict
 	}
-	jobs, err := s.store.ListJobs(ctx, store.JobFilter{
+	jobs, hasMore, _, err := s.store.ListJobsPage(ctx, store.JobFilter{
 		TenantID: filterTenantID,
 		Queue:    strings.TrimSpace(req.Queue),
 		Kind:     strings.TrimSpace(req.Kind),
@@ -449,7 +451,29 @@ func (s *Server) selectJobsForBulkOperation(ctx context.Context, principal princ
 	if err != nil {
 		return nil, err
 	}
+	if hasMore {
+		return nil, errBulkSelectionTooBroad
+	}
 	return jobs, nil
+}
+
+func handleBulkSelectionError(w http.ResponseWriter, err error, notFoundMessage string) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errBulkSelectionTooBroad) {
+		writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "bulk selection exceeds maximum of 200 items; narrow filters or page results explicitly")
+		return true
+	}
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
+		return true
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", notFoundMessage)
+		return true
+	}
+	return false
 }
 
 func (s *Server) handleBulkDisableJobs(w http.ResponseWriter, r *http.Request) {
@@ -472,15 +496,10 @@ func (s *Server) handleBulkDisableJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobs, err := s.selectJobsForBulkOperation(ctx, principal, req)
+	if handleBulkSelectionError(w, err, "job not found") {
+		return
+	}
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
-			return
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load jobs")
 		return
 	}
@@ -532,15 +551,10 @@ func (s *Server) handleBulkEnableJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobs, err := s.selectJobsForBulkOperation(ctx, principal, req)
+	if handleBulkSelectionError(w, err, "job not found") {
+		return
+	}
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
-			return
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load jobs")
 		return
 	}
@@ -592,15 +606,10 @@ func (s *Server) handleBulkPauseJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobs, err := s.selectJobsForBulkOperation(ctx, principal, req)
+	if handleBulkSelectionError(w, err, "job not found") {
+		return
+	}
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
-			return
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load jobs")
 		return
 	}
@@ -652,15 +661,10 @@ func (s *Server) handleBulkResumeJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobs, err := s.selectJobsForBulkOperation(ctx, principal, req)
+	if handleBulkSelectionError(w, err, "job not found") {
+		return
+	}
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
-			return
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load jobs")
 		return
 	}
@@ -1436,7 +1440,7 @@ func (s *Server) selectRunsForBulkOperation(ctx context.Context, principal princ
 	if !allowed {
 		return nil, store.ErrConflict
 	}
-	runs, err := s.store.ListRuns(ctx, store.RunFilter{
+	runs, hasMore, _, err := s.store.ListRunsPage(ctx, store.RunFilter{
 		TenantID:     filterTenantID,
 		Statuses:     req.Statuses,
 		JobID:        strings.TrimSpace(req.JobID),
@@ -1445,6 +1449,9 @@ func (s *Server) selectRunsForBulkOperation(ctx context.Context, principal princ
 	})
 	if err != nil {
 		return nil, err
+	}
+	if hasMore {
+		return nil, errBulkSelectionTooBroad
 	}
 	return runs, nil
 }
@@ -1487,15 +1494,10 @@ func (s *Server) handleBulkRequeueRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runs, err := s.selectRunsForBulkOperation(ctx, principal, req)
+	if handleBulkSelectionError(w, err, "run not found") {
+		return
+	}
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
-			return
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load runs")
 		return
 	}
@@ -1557,15 +1559,10 @@ func (s *Server) handleBulkRedriveRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runs, err := s.selectRunsForBulkOperation(ctx, principal, req)
+	if handleBulkSelectionError(w, err, "run not found") {
+		return
+	}
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
-			return
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load runs")
 		return
 	}
@@ -1631,15 +1628,10 @@ func (s *Server) handleBulkCancelRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runs, err := s.selectRunsForBulkOperation(ctx, principal, req)
+	if handleBulkSelectionError(w, err, "run not found") {
+		return
+	}
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusForbidden, "FORBIDDEN", "tenant access denied")
-			return
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "run not found")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to load runs")
 		return
 	}

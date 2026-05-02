@@ -3971,6 +3971,102 @@ func TestBulkJobLifecycleDryRunDoesNotMutateState(t *testing.T) {
 	assertJobState(pausedJob.JobID, false, true)
 }
 
+func TestBulkDisableJobsRejectsOverBroadFilterSelection(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	for i := 0; i < 201; i++ {
+		if _, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+			Name:         fmt.Sprintf("api-bulk-overbroad-job-%03d", i),
+			TenantID:     "tenant-api",
+			Queue:        "default",
+			Kind:         "http",
+			Payload:      map[string]any{"url": "https://example.internal/task"},
+			ScheduleType: "once",
+		}); err != nil {
+			t.Fatalf("create job %d: %v", i, err)
+		}
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var errResp map[string]any
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/jobs/disable", map[string]any{
+		"tenant_id": "tenant-api",
+	}, &errResp)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 bulk disable over-broad selector response, got %d body=%+v", status, errResp)
+	}
+	errorMap, _ := errResp["error"].(map[string]any)
+	if errorMap["code"] != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT error, got %+v", errResp)
+	}
+}
+
+func TestBulkRequeueRunsRejectsOverBroadFilterSelection(t *testing.T) {
+	jobStore := openTestStore(t)
+	ctx := context.Background()
+	resetTablesForAPI(t, jobStore)
+
+	for i := 0; i < 201; i++ {
+		result, err := jobStore.CreateJob(ctx, store.CreateJobInput{
+			Name:         fmt.Sprintf("api-bulk-overbroad-run-%03d", i),
+			TenantID:     "tenant-api",
+			Queue:        "default",
+			Kind:         "http",
+			Payload:      map[string]any{"url": "https://example.internal/task"},
+			ScheduleType: "once",
+		})
+		if err != nil {
+			t.Fatalf("create job %d: %v", i, err)
+		}
+		worker, err := jobStore.RegisterWorker(ctx, store.RegisterWorkerInput{
+			Name:           fmt.Sprintf("api-bulk-overbroad-run-worker-%03d", i),
+			Queues:         []string{"default"},
+			Capabilities:   map[string]any{"http": true},
+			MaxConcurrency: 1,
+			Metadata:       map[string]any{"role": "api"},
+		})
+		if err != nil {
+			t.Fatalf("register worker %d: %v", i, err)
+		}
+		if _, err := jobStore.DB().ExecContext(ctx, `
+			UPDATE runs
+			SET status = 'RUNNING', worker_id = $2, lease_token = 1,
+			    lease_expires_at = NOW() + INTERVAL '30 seconds', started_at = NOW(), updated_at = NOW()
+			WHERE id = $1
+		`, *result.RunID, worker.WorkerID); err != nil {
+			t.Fatalf("mark run running %d: %v", i, err)
+		}
+		if err := jobStore.FailRun(ctx, store.FailRunInput{
+			WorkerID: worker.WorkerID, RunID: *result.RunID, LeaseToken: 1,
+			ErrorCode: "HTTP_500", ErrorMessage: "terminal failure", Retryable: false,
+		}); err != nil {
+			t.Fatalf("fail run %d: %v", i, err)
+		}
+	}
+
+	server := newTestServer(t, jobStore)
+	httpServer := httptest.NewServer(server.mux)
+	defer httpServer.Close()
+
+	var errResp map[string]any
+	status := doJSONRequest(t, httpServer.Client(), tenantToken, http.MethodPost, httpServer.URL+"/v1/runs/requeue", map[string]any{
+		"tenant_id": "tenant-api",
+		"status":    []string{"FAILED"},
+	}, &errResp)
+	if status != http.StatusBadRequest {
+		t.Fatalf("expected 400 bulk requeue over-broad selector response, got %d body=%+v", status, errResp)
+	}
+	errorMap, _ := errResp["error"].(map[string]any)
+	if errorMap["code"] != "INVALID_ARGUMENT" {
+		t.Fatalf("expected INVALID_ARGUMENT error, got %+v", errResp)
+	}
+}
+
 func TestRegisterWorkerReusesIdentityByName(t *testing.T) {
 	jobStore := openTestStore(t)
 

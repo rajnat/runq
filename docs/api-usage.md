@@ -168,6 +168,10 @@ Bulk job lifecycle requests support:
 - filter selection (`tenant_id`, `queue`, `kind`, `paused`, `disabled`)
 - `dry_run`
 
+Filter-selection safeguard:
+- filter-based bulk job lifecycle selection is rejected when more than 200 jobs match
+- callers should narrow filters or page/list explicitly before issuing bulk mutations
+
 Bulk lifecycle semantics:
 - successful items are returned alongside skipped items
 - skipped items carry explicit `error_code` and `error_message`
@@ -231,6 +235,10 @@ Bulk endpoints:
 - `POST /v1/runs/redrive`
 
 Bulk run requests support `dry_run`.
+
+Filter-selection safeguard:
+- filter-based bulk run selection is rejected when more than 200 runs match
+- callers should narrow filters or page/list explicitly before issuing bulk mutations
 
 Bulk run semantics:
 - partial success is expected and returned item-by-item
